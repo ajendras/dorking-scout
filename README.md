@@ -1,2 +1,280 @@
-# dorking-scout
-Discover unique websites by tech stack, payment gateway or product niche using curated search dorks
+<!-- header:start -->
+<div align="center">
+
+<img src="./assets/banner.svg" alt="Dork Scout" width="100%">
+
+<a href="#-quick-start"><img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=20&pause=1000&color=6f8a5e&center=true&vCenter=true&width=640&lines=Scout+the+web+with+precision;Curated+dorks+for+60%2B+categories;Free+alternative+to+BuiltWith" alt="Scout the web with precision · Curated dorks for 60+ categories · Free alternative to BuiltWith"></a>
+
+<a href="LICENSE"><img src="https://img.shields.io/github/license/ajendras/dorking-scout?style=for-the-badge&color=c56a3b" alt="License"></a>
+<img src="https://img.shields.io/badge/Python-c56a3b?style=for-the-badge&logo=python&logoColor=white" alt="Python">
+<a href="https://github.com/ajendras/dorking-scout/stargazers"><img src="https://img.shields.io/github/stars/ajendras/dorking-scout?style=for-the-badge&logo=github&color=6f8a5e" alt="Stars"></a>
+<a href="https://github.com/ajendras/dorking-scout/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/ajendras/dorking-scout/ci.yml?style=for-the-badge&label=CI" alt="CI"></a>
+<img src="https://img.shields.io/github/last-commit/ajendras/dorking-scout?style=for-the-badge&color=c56a3b" alt="Last commit">
+<a href="CONTRIBUTING.md"><img src="https://img.shields.io/badge/PRs-welcome-22c55e?style=for-the-badge" alt="PRs welcome"></a>
+
+**Discover unique websites by tech stack, payment gateway or product niche using curated search dorks**
+
+[✨ Features](#-features) • [⚡ Quick start](#-quick-start) • [🧰 Usage](#-usage) • [🧩 Architecture](#-architecture) • [📍 Roadmap](#-roadmap) • [🤝 Contributing](#-contributing)
+
+</div>
+<!-- header:end -->
+
+## ✨ Why Dork Scout?
+
+Security researchers, OSINT practitioners and market analysts need to surface real-world sites using specific payment gateways, platforms or selling products in a narrow vertical. Paid tools like BuiltWith are expensive while public dork lists are fragmented, outdated and full of noise. Dork Scout delivers a free, curated, instantly usable catalog of high-signal dorks with a warm organic UI, multi-engine search, automatic deduplication and lightweight fingerprinting.
+
+- Hundreds of tested dorks grouped into **payment gateways**, **platforms** and **product niches**
+- Safe, rate-limited queries across Google, Bing, DuckDuckGo (plus Yandex link generation)
+- API-less tech detection inspired by Wappalyzer using HTML signatures and headers
+- One-click CSV/JSON export of clean, deduplicated domains with metadata
+
+## 🎬 Demo
+
+<p align="center"><img src="./assets/demo.svg" alt="Dork Scout demo" width="760"></p>
+
+## 🚀 Features
+
+<table>
+<tr>
+<td width="33%">
+💳 <b>Curated Dorks</b><br>
+Hundreds of tested patterns for gateways, CMS platforms and niches
+</td>
+<td width="33%">
+🔎 <b>Multi-Engine</b><br>
+Queries Google, Bing and DuckDuckGo with built-in rate-limit safety
+</td>
+<td width="33%">
+📦 <b>Niche Explorer</b><br>
+Find stores selling shoes, books, egifts or any custom vertical
+</td>
+</tr>
+<tr>
+<td>
+🔬 <b>API-less Scan</b><br>
+Lightweight fingerprinting via regex signatures on HTML and headers
+</td>
+<td>
+🧹 <b>Deduplication</b><br>
+Removes marketplaces and noise, returns unique second-level domains
+</td>
+<td>
+📤 <b>One-click Export</b><br>
+Download results with metadata as CSV or JSON
+</td>
+</tr>
+<tr>
+<td>
+🖼️ <b>Category Browser</b><br>
+Beautiful blob-shaped cards and filters using the sand/olive palette
+</td>
+<td>
+⚡ <b>Async Runner</b><br>
+Background workers keep the HTMX UI responsive during scans
+</td>
+<td>
+📋 <b>Rich Results</b><br>
+<code>DiscoveryResult</code> objects combine domains, detected tech and timestamps
+</td>
+</tr>
+</table>
+
+## 📦 Installation
+
+Requires Python 3.9+ and no external services.
+
+```bash
+git clone https://github.com/ajendras/dorking-scout.git
+cd dork-scout
+pip install -e .
+```
+
+Start the server:
+
+```bash
+dork-scout
+```
+
+The app will be available at http://127.0.0.1:8000 with the warm organic UI (soft paper texture, serif headings, terracotta/olive accents).
+
+## ⚡ Quick start
+
+```python
+import asyncio
+from dorkscout.dorks import get_dorks, build_query
+from dorkscout.search import SearchClient
+from dorkscout.detector import detect_technologies
+
+async def main():
+    # Find Shopify stores in the coffee niche
+    patterns = get_dorks(tech="Shopify")
+    client = SearchClient(timeout=10.0)
+    
+    query = build_query(patterns[0], "coffee")
+    domains = await client.search_with_rate_limit(query, patterns[0].engine)
+    
+    print("Discovered domains:", domains[:5])
+    
+    # Lightweight detection on first result
+    if domains:
+        html = ""  # would be fetched in real usage
+        tech = detect_technologies(html)
+        print("Detected:", tech)
+    
+    await client.close()
+
+asyncio.run(main())
+```
+
+The server can also be started with `dork-scout` and used via the browser or `/api/search`.
+
+## 🧰 Usage
+
+### Explore payment gateways
+
+```bash
+python examples/discover_payments.py
+```
+
+This script uses `get_dorks(tech="Stripe")`, appends a gift-card term via `build_query()`, runs searches through `SearchClient.search_with_rate_limit()`, applies `detect_technologies()` and writes a CSV using `DiscoveryResult` objects.
+
+### Niche product search
+
+```bash
+python examples/niche_books.py
+```
+
+Demonstrates the “niches” category with product-specific terms, deduplication against the `noise_domains` set, and export of up to 20 unique domains.
+
+### API-driven search
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/search \
+  -H "Content-Type: application/json" \
+  -d '{"category":"niches","term":"vintage leather"}'
+```
+
+Returns a JSON payload with `results`, `total`, `queries_used` and rich `DiscoveryResult` entries.
+
+<details><summary>Exporting results programmatically</summary>
+
+```python
+import httpx
+resp = httpx.get(
+    "http://127.0.0.1:8000/api/export",
+    params={"tech": "Stripe", "term": "gift", "format": "csv"}
+)
+with open("stripe_gift.csv", "wb") as f:
+    f.write(resp.content)
+```
+The endpoint uses the same `get_dorks()` + `SearchClient` flow but limits detection for speed and streams CSV with semicolon-separated tech lists.
+
+</details>
+
+<details><summary>Extending the dork database</summary>
+
+Place a `dorks.json` in the project root matching the shape of `DEFAULT_DORK_DB`. It is automatically merged by `config._load_json_override()` and picked up by `load_dorks()` and `get_dorks()`.
+
+</details>
+
+## 🔧 Configuration
+
+<table>
+<tr><th>Option</th><th>Default</th><th>Description</th></tr>
+<tr><td><code>DORKS_JSON_PATH</code></td><td><code>./dorks.json</code></td><td>Optional file that extends or overrides <code>DEFAULT_DORK_DB</code> (loaded by <code>config.py</code>)</td></tr>
+<tr><td><code>SEARCH_ENGINES</code></td><td>Google, Bing, DuckDuckGo, Yandex</td><td>List of dicts with <code>base</code>, <code>query_param</code> and <code>rate_limit</code> used by <code>SearchClient</code></td></tr>
+<tr><td><code>TECH_TO_CATEGORY</code></td><td>Hard-coded mapping</td><td>Links tech names (Stripe, Shopify, Books…) to categories for <code>get_dorks(category=...)</code></td></tr>
+<tr><td><code>timeout</code> (SearchClient)</td><td>12.0</td><td>httpx timeout passed to <code>AsyncClient</code></td></tr>
+</table>
+
+## 🧩 Architecture
+
+```mermaid
+flowchart TD
+    UI[Browser + HTMX] --> Web[web.py routes<br/>index, category_page]
+    Web --> API[api.py router<br/>/api/search, /api/export]
+    API --> Dorks[dorks.py<br/>get_dorks() • build_query()]
+    Dorks --> Config[config.py<br/>DORK_DB + SEARCH_ENGINES]
+    API --> Search[search.py<br/>SearchClient.search_with_rate_limit()]
+    Search --> Parser[parse_results() +<br/>BeautifulSoup]
+    Parser --> Detector[detector.py<br/>detect_technologies() using TECH_SIGNATURES]
+    Detector --> Models[models.py<br/>DiscoveryResult]
+    API --> Export[CSV/JSON StreamingResponse]
+```
+
+The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the curated database, `search.py` handles async multi-engine queries with noise filtering, `detector.py` adds technology fingerprints, and FastAPI routers (`api.py`, `web.py`) serve both the organic UI and JSON endpoints. All heavy lifting runs in background workers so the HTMX interface stays responsive.
+
+## 📁 Project structure
+
+```text
+.
+├── pyproject.toml                 # Metadata, dependencies, console_scripts entry 'dork-scout'
+├── dorks.json                     # Optional override (merged with DEFAULT_DORK_DB)
+├── src/dorkscout/
+│   ├── main.py                    # create_app() FastAPI factory + run() uvicorn entrypoint
+│   ├── config.py                  # DEFAULT_DORK_DB, SEARCH_ENGINES, load functions
+│   ├── models.py                  # Category, DorkPattern, DiscoveryResult Pydantic models
+│   ├── dorks.py                   # load_dorks, get_dorks, build_query, list_all_techs
+│   ├── search.py                  # SearchClient (async Google/Bing/DDG) + parse_results
+│   ├── detector.py                # detect_technologies + TECH_SIGNATURES regex rules
+│   ├── api.py                     # /api/categories, /api/search (POST), /api/export
+│   └── web.py                     # UI routes serving Jinja2 templates with HTMX
+├── examples/
+│   ├── discover_payments.py       # Stripe + gift-card example with CSV export
+│   └── niche_books.py             # Product-niche demo exporting unique domains
+├── tests/
+│   ├── test_dorks.py              # Tests for loading, filtering, query building
+│   └── test_search.py             # Mocked HTML parsing and deduplication tests
+└── templates/index.html           # Earthy UI with blob cards, Tailwind + HTMX
+```
+
+## 🧪 Testing
+
+```bash
+pytest
+```
+
+The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling, `parse_results()` with mocked Google/Bing HTML, noise-domain removal, `detect_technologies()` signature matching, error cases and Pydantic validation.
+
+## 📍 Roadmap
+<!-- roadmap:start -->
+- [x] **v0.1.0** — first release: Curated Dorks, Multi-Engine, Niche Explorer, API-less Scan
+- [ ] Add support for Baidu and Yandex result scraping
+- [ ] Allow community PRs to extend dork database with validation tests
+- [ ] Persistent SQLite store for discovered domains with search history
+- [ ] Add domain age and SSL cert metadata enrichment using free sources
+- [ ] Implement local LLM helper to generate new dorks for unknown tech
+- [ ] Create companion browser extension that suggests dorks from Wappalyzer detections
+- [ ] Add scheduled background jobs with email or webhook alerts for fresh domains
+- [ ] Build analytics dashboard showing tech distribution graphs across results
+- [ ] Support advanced operators like filetype:pdf and intitle: for document hunting
+- [ ] CLI subcommand for bulk list processing and headless CSV output
+- [ ] Improve fingerprint database with 150+ additional app signatures
+- [ ] Add relevance scoring that prefers smaller independent sites over big brands
+
+> 🤖 This roadmap is worked through continuously — ideas and PRs welcome!
+<!-- roadmap:end -->
+
+## 🤝 Contributing
+
+Contributions are warmly welcomed! Whether it's a new dork pattern, improved signature, UI tweak or bug fix, please read [CONTRIBUTING.md](https://github.com/ajendras/dorking-scout/blob/main/CONTRIBUTING.md) and follow our [CODE_OF_CONDUCT.md](https://github.com/ajendras/dorking-scout/blob/main/CODE_OF_CONDUCT.md). We label good-first-issue PRs to help newcomers get started.
+
+## 📄 License
+
+MIT License — see [LICENSE](LICENSE) for details.
+
+<!-- footer:start -->
+<div align="center">
+
+### ⭐ Star history
+
+<a href="https://star-history.com/#ajendras/dorking-scout&Date"><img src="https://api.star-history.com/svg?repos=ajendras/dorking-scout&type=Date" alt="Star history" width="600"></a>
+
+If **Dork Scout** saves you time, a ⭐ helps others find it.
+
+Made with ❤️ by [Ajendra](https://ajendra.info)
+
+<img src="https://capsule-render.vercel.app/api?type=waving&color=0:c56a3b,100:6f8a5e&height=120&section=footer" width="100%" alt="">
+
+</div>
+<!-- footer:end -->
