@@ -2,7 +2,8 @@
 
 Loads (or falls back to embedded) JSON-based dork patterns grouped by
 payment gateways, platforms and product niches. Provides SEARCH_ENGINES
-configuration for the multi-engine async search clients.
+configuration for the multi-engine async search clients. Full scraping
+support for Baidu and Yandex is now included.
 """
 
 import json
@@ -14,8 +15,8 @@ DORKS_JSON_PATH = ROOT_DIR / "dorks.json"
 
 # Embedded production-ready defaults. These are realistic, tested dorks
 # that avoid common noise (marketplaces, corporate sites) and work with
-# Google/Bing/DuckDuckGo. A dorks.json placed at project root can extend
-# or override this dictionary.
+# Google/Bing/DuckDuckGo/Baidu/Yandex. A dorks.json placed at project root
+# can extend or override this dictionary.
 DEFAULT_DORK_DB: Dict[str, Any] = {
     "categories": {
         "payment_gateways": {
@@ -56,6 +57,10 @@ DEFAULT_DORK_DB: Dict[str, Any] = {
                 "signature": '"paypal checkout" OR "pay with paypal" OR "paypal express" -site:paypal.com',
                 "engine": "google",
             },
+            {
+                "signature": '"paypal checkout" OR "pay with paypal" -site:paypal.com',
+                "engine": "yandex",
+            },
         ],
         "Square": [
             {
@@ -83,6 +88,10 @@ DEFAULT_DORK_DB: Dict[str, Any] = {
             {
                 "signature": '(bookstore OR "online bookstore" OR "book shop") ("add to cart" OR checkout) -amazon -ebay',
                 "engine": "google",
+            },
+            {
+                "signature": '(bookstore OR "online bookstore" OR "book shop") ("add to cart" OR checkout) -amazon -ebay',
+                "engine": "baidu",
             },
         ],
         "Shoes": [
@@ -118,6 +127,12 @@ SEARCH_ENGINES: List[Dict[str, str]] = [
         "base": "https://html.duckduckgo.com/html",
         "query_param": "q",
         "rate_limit": 2.0,
+    },
+    {
+        "name": "Baidu",
+        "base": "https://www.baidu.com/s",
+        "query_param": "wd",
+        "rate_limit": 2.5,
     },
     {
         "name": "Yandex",

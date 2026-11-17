@@ -1,9 +1,10 @@
 """Async search clients and HTML result parsers for Dork Scout.
 
-Provides a rate-limit-aware httpx.AsyncClient that queries Google, Bing and
-DuckDuckGo. Results are parsed with BeautifulSoup4, deduplicated and filtered
-of common noise (marketplaces, search engines, social platforms). The
-SearchClient is used by background workers and the /api/search endpoint.
+Provides a rate-limit-aware httpx.AsyncClient that queries Google, Bing,
+DuckDuckGo, Baidu and Yandex. Results are parsed with BeautifulSoup4,
+deduplicated and filtered of common noise (marketplaces, search engines,
+social platforms). The SearchClient is used by background workers and the
+/api/search endpoint.
 """
 
 import asyncio
@@ -23,6 +24,7 @@ class SearchClient:
 
     All search methods return a list of clean, unique second-level domains.
     Rate-limit hints from config are respected via optional delays.
+    Supports Google, Bing, DuckDuckGo, Baidu and Yandex.
     """
 
     def __init__(self, timeout: float = 12.0) -> None:
@@ -56,6 +58,7 @@ class SearchClient:
             "bing.com",
             "duckduckgo.com",
             "yandex.com",
+            "baidu.com",
             "yahoo.com",
             "amazon.com",
             "ebay.com",
@@ -138,6 +141,51 @@ class SearchClient:
             print(f"DuckDuckGo request failed: {exc}")
             return []
 
+    async def search_baidu(self, query: str) -> List[str]:
+        """Execute a Baidu search and return parsed unique domains.
+
+        Baidu uses the 'wd' parameter and often wraps links in a /link?url=
+        redirector.
+        """
+        if not query or not query.strip():
+            raise ValueError("Search query cannot be empty")
+
+        config = self.engine_configs.get("baidu", {})
+        base = config.get("base", "https://www.baidu.com/s")
+        param = config.get("query_param", "wd")
+
+        try:
+            resp = await self.client.get(
+                base,
+                params={param: query},
+                headers={"Referer": "https://www.baidu.com/"},
+            )
+            resp.raise_for_status()
+            return self.parse_results(resp.text, "baidu")
+        except httpx.HTTPError as exc:
+            print(f"Baidu request failed for query '{query[:60]}...': {exc}")
+            return []
+
+    async def search_yandex(self, query: str) -> List[str]:
+        """Execute a Yandex search and return parsed unique domains.
+
+        Yandex frequently uses redirect parameters containing the real target URL.
+        """
+        if not query or not query.strip():
+            raise ValueError("Search query cannot be empty")
+
+        config = self.engine_configs.get("yandex", {})
+        base = config.get("base", "https://yandex.com/search")
+        param = config.get("query_param", "text")
+
+        try:
+            resp = await self.client.get(base, params={param: query})
+            resp.raise_for_status()
+            return self.parse_results(resp.text, "yandex")
+        except httpx.HTTPError as exc:
+            print(f"Yandex request failed for query '{query[:60]}...': {exc}")
+            return []
+
     def parse_results(self, html: str, engine: str = "google") -> List[str]:
         """Parse search-engine HTML and extract a deduplicated list of domains.
 
@@ -195,6 +243,41 @@ class SearchClient:
                         if domain:
                             domains.add(domain)
                 elif href.startswith(("http", "//")):
+                    domain = self._extract_domain(href)
+                    if domain:
+                        domains.add(domain)
+
+        elif engine == "baidu":
+            for a_tag in soup.select("a[href]"):
+                href = a_tag.get("href", "")
+                if "/link?url=" in href or "url=" in href:
+                    match = re.search(r"url=([^&]+)", href)
+                    if match:
+                        url = match.group(1)
+                        # basic unescape for common entities
+                        url = (
+                            url.replace("%3A", ":")
+                            .replace("%2F", "/")
+                            .replace("%3F", "?")
+                        )
+                        domain = self._extract_domain(url)
+                        if domain:
+                            domains.add(domain)
+                elif href.startswith(("http", "//")):
+                    domain = self._extract_domain(href)
+                    if domain:
+                        domains.add(domain)
+
+        elif engine == "yandex":
+            for a_tag in soup.select("a[href]"):
+                href = a_tag.get("href", "")
+                if "url=" in href or "to=" in href:
+                    match = re.search(r"(https?://[^&]+)", href)
+                    if match:
+                        domain = self._extract_domain(match.group(1))
+                        if domain:
+                            domains.add(domain)
+                elif href.startswith(("http://", "https://")) and "yandex" not in href.lower():
                     domain = self._extract_domain(href)
                     if domain:
                         domains.add(domain)
@@ -271,7 +354,8 @@ class SearchClient:
     ) -> List[str]:
         """Convenience wrapper that respects the engine's configured rate_limit.
 
-        Returns parsed domains after sleeping the required delay.
+        Returns parsed domains after sleeping the required delay. Now supports
+        Baidu and Yandex scraping in addition to the original engines.
         """
         engine_key = engine.lower()
         config = self.engine_configs.get(engine_key, {})
@@ -283,8 +367,12 @@ class SearchClient:
             domains = await self.search_bing(query)
         elif engine_key == "duckduckgo":
             domains = await self.search_duckduckgo(query)
+        elif engine_key == "baidu":
+            domains = await self.search_baidu(query)
+        elif engine_key == "yandex":
+            domains = await self.search_yandex(query)
         else:
-            # For Yandex we only generate a link (no scraping)
+            # Unknown engine falls back to empty result (caller can log)
             domains = []
 
         await asyncio.sleep(delay)

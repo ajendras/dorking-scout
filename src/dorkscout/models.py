@@ -40,7 +40,7 @@ class DorkPattern(BaseModel):
     )
     engine: str = Field(
         default="google",
-        pattern=r"^(google|bing|duckduckgo|yandex)$",
+        pattern=r"^(google|bing|duckduckgo|yandex|baidu)$",
         description="Preferred search engine for this pattern",
     )
 

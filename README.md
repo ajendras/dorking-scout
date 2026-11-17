@@ -24,7 +24,7 @@
 Security researchers, OSINT practitioners and market analysts need to surface real-world sites using specific payment gateways, platforms or selling products in a narrow vertical. Paid tools like BuiltWith are expensive while public dork lists are fragmented, outdated and full of noise. Dork Scout delivers a free, curated, instantly usable catalog of high-signal dorks with a warm organic UI, multi-engine search, automatic deduplication and lightweight fingerprinting.
 
 - Hundreds of tested dorks grouped into **payment gateways**, **platforms** and **product niches**
-- Safe, rate-limited queries across Google, Bing, DuckDuckGo (plus Yandex link generation)
+- Safe, rate-limited queries across Google, Bing, DuckDuckGo, Baidu and Yandex
 - API-less tech detection inspired by Wappalyzer using HTML signatures and headers
 - One-click CSV/JSON export of clean, deduplicated domains with metadata
 
@@ -42,7 +42,7 @@ Hundreds of tested patterns for gateways, CMS platforms and niches
 </td>
 <td width="33%">
 🔎 <b>Multi-Engine</b><br>
-Queries Google, Bing and DuckDuckGo with built-in rate-limit safety
+Queries Google, Bing, DuckDuckGo, Baidu and Yandex with built-in rate-limit safety
 </td>
 <td width="33%">
 📦 <b>Niche Explorer</b><br>
@@ -182,7 +182,7 @@ Place a `dorks.json` in the project root matching the shape of `DEFAULT_DORK_DB`
 <table>
 <tr><th>Option</th><th>Default</th><th>Description</th></tr>
 <tr><td><code>DORKS_JSON_PATH</code></td><td><code>./dorks.json</code></td><td>Optional file that extends or overrides <code>DEFAULT_DORK_DB</code> (loaded by <code>config.py</code>)</td></tr>
-<tr><td><code>SEARCH_ENGINES</code></td><td>Google, Bing, DuckDuckGo, Yandex</td><td>List of dicts with <code>base</code>, <code>query_param</code> and <code>rate_limit</code> used by <code>SearchClient</code></td></tr>
+<tr><td><code>SEARCH_ENGINES</code></td><td>Google, Bing, DuckDuckGo, Baidu, Yandex</td><td>List of dicts with <code>base</code>, <code>query_param</code> and <code>rate_limit</code> used by <code>SearchClient</code> (full scraping support for all engines)</td></tr>
 <tr><td><code>TECH_TO_CATEGORY</code></td><td>Hard-coded mapping</td><td>Links tech names (Stripe, Shopify, Books…) to categories for <code>get_dorks(category=...)</code></td></tr>
 <tr><td><code>timeout</code> (SearchClient)</td><td>12.0</td><td>httpx timeout passed to <code>AsyncClient</code></td></tr>
 </table>
@@ -195,7 +195,7 @@ flowchart TD
     Web --> API[api.py router<br/>/api/search, /api/export]
     API --> Dorks[dorks.py<br/>get_dorks() • build_query()]
     Dorks --> Config[config.py<br/>DORK_DB + SEARCH_ENGINES]
-    API --> Search[search.py<br/>SearchClient.search_with_rate_limit()]
+    API --> Search[search.py<br/>SearchClient.search_with_rate_limit() (Google/Bing/DDG/Baidu/Yandex)]
     Search --> Parser[parse_results() +<br/>BeautifulSoup]
     Parser --> Detector[detector.py<br/>detect_technologies() using TECH_SIGNATURES]
     Detector --> Models[models.py<br/>DiscoveryResult]
@@ -215,7 +215,7 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 │   ├── config.py                  # DEFAULT_DORK_DB, SEARCH_ENGINES, load functions
 │   ├── models.py                  # Category, DorkPattern, DiscoveryResult Pydantic models
 │   ├── dorks.py                   # load_dorks, get_dorks, build_query, list_all_techs
-│   ├── search.py                  # SearchClient (async Google/Bing/DDG) + parse_results
+│   ├── search.py                  # SearchClient (async Google/Bing/DDG/Baidu/Yandex) + parse_results
 │   ├── detector.py                # detect_technologies + TECH_SIGNATURES regex rules
 │   ├── api.py                     # /api/categories, /api/search (POST), /api/export
 │   └── web.py                     # UI routes serving Jinja2 templates with HTMX
@@ -239,7 +239,7 @@ The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks(
 ## 📍 Roadmap
 <!-- roadmap:start -->
 - [x] **v0.1.0** — first release: Curated Dorks, Multi-Engine, Niche Explorer, API-less Scan
-- [ ] Add support for Baidu and Yandex result scraping
+- [x] Add support for Baidu and Yandex result scraping
 - [ ] Allow community PRs to extend dork database with validation tests
 - [ ] Persistent SQLite store for discovered domains with search history
 - [ ] Add domain age and SSL cert metadata enrichment using free sources
