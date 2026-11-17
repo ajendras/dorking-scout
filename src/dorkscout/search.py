@@ -9,6 +9,7 @@ SearchClient is used by background workers and the /api/search endpoint.
 import asyncio
 import re
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -142,10 +143,11 @@ class SearchClient:
 
         Engine-specific heuristics are used for link extraction. All domains
         are passed through _is_valid_domain() which removes marketplaces,
-        search-engine domains and other low-value results.
+        search-engine domains and other low-value results. The extractor
+        always returns second-level domains for consistency with DiscoveryResult.
 
         Returns:
-            Sorted list of unique, clean domains.
+            Sorted list of unique, clean second-level domains.
         """
         if not html or len(html.strip()) < 200:
             return []
@@ -203,20 +205,42 @@ class SearchClient:
         return sorted(valid)
 
     def _extract_domain(self, url_or_href: str) -> Optional[str]:
-        """Return the second-level domain from a URL string or None."""
+        """Return the second-level domain from a URL string or None.
+
+        Uses stdlib urlparse for robustness (replaces fragile regex). Takes
+        the last two hostname parts to guarantee a second-level domain that
+        satisfies the DiscoveryResult model validator.
+        """
         if not url_or_href or not isinstance(url_or_href, str):
             return None
 
-        # Remove protocol, www., path, query, fragment
-        match = re.search(
-            r"(?:https?://)?(?:www\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-            r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+)",
-            url_or_href,
-            re.IGNORECASE,
-        )
-        if match:
-            return match.group(1).lower()
-        return None
+        try:
+            # Normalise to full URL for urlparse
+            if "://" not in url_or_href:
+                url_or_href = "https://" + url_or_href.lstrip("/")
+            parsed = urlparse(url_or_href)
+            if not parsed.hostname:
+                return None
+            hostname = parsed.hostname.lower()
+            parts = hostname.split(".")
+            if len(parts) >= 2:
+                return ".".join(parts[-2:])
+            return hostname
+        except Exception:  # pylint: disable=broad-except
+            # Fallback to original regex for any edge cases
+            match = re.search(
+                r"(?:https?://)?(?:www\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+                r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+)",
+                url_or_href,
+                re.IGNORECASE,
+            )
+            if match:
+                domain = match.group(1).lower()
+                parts = domain.split(".")
+                if len(parts) >= 2:
+                    return ".".join(parts[-2:])
+                return domain
+            return None
 
     def _is_valid_domain(self, domain: str) -> bool:
         """Return True only for plausible, non-noise domains.

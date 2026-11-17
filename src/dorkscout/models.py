@@ -6,7 +6,7 @@ websites. All models include input validation with clear error messages.
 
 from typing import List
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class Category(BaseModel):
@@ -76,9 +76,8 @@ class DiscoveryResult(BaseModel):
         if not any(t.lower() == tech_lower for t in self.tech):
             self.tech.append(tech_name)
 
-    class Config:
-        """Pydantic configuration."""
-        json_schema_extra = {
+    model_config = ConfigDict(
+        json_schema_extra={
             "example": {
                 "domain": "examplebooks.com",
                 "tech": ["Shopify", "Stripe"],
@@ -86,6 +85,7 @@ class DiscoveryResult(BaseModel):
                 "url": "https://examplebooks.com",
             }
         }
+    )
 
 
 __all__ = ["Category", "DorkPattern", "DiscoveryResult"]
