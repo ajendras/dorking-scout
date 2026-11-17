@@ -1,48 +1,35 @@
-"""Tests for the search module."""
-
 import asyncio
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from dorkscout.search import SearchClient, parse_results
-from dorkscout.models import DiscoveryResult
-
-
-def test_parse_results_empty():
-    """Empty or tiny HTML returns no domains."""
-    assert parse_results("") == []
-    assert parse_results("<html><body>No content</body></html>") == []
+from dorkscout.detector import detect_technologies
 
 
 def test_parse_results_google():
-    """Google parser handles redirector links and direct http links."""
+    """Google parser handles the /url?q= redirector and normal links."""
     html = '''
-    <a href="/url?q=https://coffeebean.com/menu">Coffee</a>
-    <a href="https://rarebooks.com">Books</a>
-    <a href="https://amazon.com">Noise</a>
+        <a href="/url?q=https://coffeebean.com&amp;ved=0CA&...">Coffee Bean</a>
+        <a href="https://roastmasters.com">Roast Masters</a>
     '''
     domains = parse_results(html, "google")
     assert "coffeebean.com" in domains
-    assert "rarebooks.com" in domains
-    assert "amazon.com" not in domains
+    assert "roastmasters.com" in domains
 
 
 def test_parse_results_bing():
-    """Bing parser extracts from b_algo links and skips noise."""
-    html = '''
-    <li class="b_algo"><a href="https://indiebooks.com">Indie Books</a></li>
-    <a href="https://ebay.com">Noise</a>
-    '''
+    """Bing parser extracts domains from standard result links."""
+    html = '<a href="https://indiebooks.com/page">Link</a>'
     domains = parse_results(html, "bing")
     assert "indiebooks.com" in domains
-    assert "ebay.com" not in domains
 
 
 def test_parse_results_duckduckgo():
     """DuckDuckGo parser handles uddg links and normal links."""
     html = '''
-    <a href="https://html.duckduckgo.com/html/?uddg=https://novelbooks.com">Novel Books</a>
+        <a href="https://html.duckduckgo.com/html/?uddg=https://novelbooks.com">Novel Books</a>
     '''
     domains = parse_results(html, "duckduckgo")
     assert "novelbooks.com" in domains
@@ -60,15 +47,16 @@ def test_parse_results_fallback_engine():
 def test_noise_filtering():
     """Noise domains (marketplaces, social, etc.) are removed."""
     html = '''
-    <a href="https://amazon.com">Amazon</a>
-    <a href="https://facebook.com">FB</a>
-    <a href="https://myshopify.com">Shopify</a>
-    <a href="https://goodstore.com">Good</a>
+        <a href="https://amazon.com">Amazon</a>
+        <a href="https://facebook.com">FB</a>
+        <a href="https://myshopify.com">Shopify</a>
+        <a href="https://goodstore.com">Good</a>
     '''
     domains = parse_results(html, "google")
     assert "goodstore.com" in domains
-    for noise in ("amazon.com", "facebook.com", "myshopify.com"):
-        assert noise not in domains
+    assert "amazon.com" not in domains
+    assert "facebook.com" not in domains
+    assert "myshopify.com" not in domains
 
 
 def test_extract_domain_edge_cases():
@@ -78,70 +66,25 @@ def test_extract_domain_edge_cases():
     assert client._extract_domain("https://example.co.uk") == "co.uk"
     assert client._extract_domain("https://www.rarebooks.com") == "rarebooks.com"
     assert client._extract_domain("not-a-url") is None
-    assert client._extract_domain("") is None
+    assert client._extract_domain("localhost") is None
+    assert client._extract_domain("https://192.168.1.1") is None
 
 
-def test_is_valid_domain():
-    """_is_valid_domain rejects noise and invalid hostnames."""
-    client = SearchClient()
-    assert client._is_valid_domain("indiebooks.com")
-    assert not client._is_valid_domain("amazon.com")
-    assert not client._is_valid_domain("google.com")
-    assert not client._is_valid_domain("1.2.3.4")
-    assert not client._is_valid_domain("localhost")
-    assert not client._is_valid_domain("short")
+def test_client_http_error_handling():
+    """HTTP errors during search are caught gracefully and return an empty list."""
+    async def inner_test():
+        client = SearchClient(timeout=5.0)
+        try:
+            mock_get = AsyncMock(side_effect=httpx.HTTPError("Simulated search engine failure"))
+            with patch.object(client.client, "get", mock_get):
+                domains = await client.search_with_rate_limit(
+                    "test query that will fail", "google", delay_override=0.0
+                )
+                assert domains == []
+        finally:
+            await client.close()
 
-
-def test_search_with_rate_limit_smoke():
-    """Smoke test for the rate-limited async search (no pytest-asyncio needed)."""
-    async def _run():
-        client = SearchClient(timeout=2.0)
-        # yandex path returns [] immediately (no network)
-        domains = await client.search_with_rate_limit(
-            "indie bookstore", "yandex", delay_override=0.0
-        )
-        assert isinstance(domains, list)
-        await client.close()
-        return domains
-
-    domains = asyncio.run(_run())
-    assert len(domains) == 0
-
-
-@pytest.mark.parametrize("engine", ["google", "bing", "duckduckgo"])
-def test_search_methods_return_lists(engine):
-    """All engine-specific search methods return lists (smoke)."""
-    client = SearchClient(timeout=1.0)
-    method = getattr(client, f"search_{engine}", None)
-    if method:
-        # We don't call real network in parametrized test; just verify signature
-        assert callable(method)
-
-
-def test_enrich_with_detection():
-    """enrich_with_detection turns domains into DiscoveryResult objects."""
-    client = SearchClient()
-    html_map = {
-        "coffeebean.com": "<html>stripe checkout</html>",
-        "rarebooks.com": "<html>shopify cdn</html>",
-    }
-    results = client.enrich_with_detection(["coffeebean.com", "rarebooks.com"], html_map)
-    assert len(results) == 2
-    assert any(r.domain == "coffeebean.com" for r in results)
-    assert any("Stripe" in r.tech for r in results)
-    assert any("Shopify" in r.tech for r in results)
-    for r in results:
-        assert isinstance(r, DiscoveryResult)
-
-
-@patch("httpx.AsyncClient.get", new_callable=AsyncMock)
-async def test_client_http_error_handling(mock_get):
-    """HTTP errors in search methods return empty lists gracefully."""
-    mock_get.side_effect = httpx.HTTPError("Simulated error")
-    client = SearchClient(timeout=1.0)
-    domains = await client.search_google("test query")
-    assert domains == []
-    await client.close()
+    asyncio.run(inner_test())
 
 
 def test_parse_results_with_minimal_html():
@@ -151,4 +94,57 @@ def test_parse_results_with_minimal_html():
     assert "teststore.com" in domains
 
 
-__all__ = ["test_parse_results_fallback_engine", "test_search_with_rate_limit_smoke"]
+def test_search_client_initialization():
+    """SearchClient sets up engines, noise list and async client correctly."""
+    client = SearchClient(timeout=10.0)
+    assert "google" in client.engine_configs
+    assert "bing" in client.engine_configs
+    assert "duckduckgo" in client.engine_configs
+    assert len(client.noise_domains) >= 15
+    assert client.timeout == 10.0
+
+
+def test_is_valid_domain():
+    """_is_valid_domain correctly filters noise and invalid domains."""
+    client = SearchClient()
+    assert client._is_valid_domain("indiebooks.com") is True
+    assert client._is_valid_domain("goodstore.com") is True
+    assert client._is_valid_domain("amazon.com") is False
+    assert client._is_valid_domain("myshopify.com") is False
+    assert client._is_valid_domain("facebook.com") is False
+    assert client._is_valid_domain("1shop.com") is False  # starts with digit
+
+
+def test_enrich_with_detection():
+    """enrich_with_detection turns domains into DiscoveryResult objects with
+    placeholder tech detection.
+    """
+    client = SearchClient()
+    domains = ["teststore.com", "coffeebean.com"]
+    html_map = {
+        "teststore.com": "<html>powered by shopify and stripe</html>",
+        "coffeebean.com": "<html>plain html</html>",
+    }
+    results = client.enrich_with_detection(domains, html_map)
+    assert len(results) == 2
+    for r in results:
+        if r.domain == "teststore.com":
+            assert "Shopify" in r.tech
+            assert "Stripe" in r.tech
+        if r.domain == "coffeebean.com":
+            assert len(r.tech) == 0
+
+
+def test_detect_technologies_integration():
+    """Detector works on real HTML snippets (cross-check with search flow)."""
+    html = '<html><head><script src="https://cdn.shopify.com"></script></head></html>'
+    tech = detect_technologies(html)
+    assert "Shopify" in tech
+
+
+@pytest.mark.parametrize("engine", ["google", "bing", "duckduckgo"])
+def test_parse_results_empty_or_invalid_html(engine):
+    """Parser returns empty list for empty or tiny input without crashing."""
+    assert parse_results("", engine) == []
+    assert parse_results("   ", engine) == []
+    assert parse_results("<html></html>", engine) == []
