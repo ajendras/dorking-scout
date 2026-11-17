@@ -58,6 +58,7 @@ class SearchClient:
             "bing.com",
             "duckduckgo.com",
             "yandex.com",
+            "yandex.ru",
             "baidu.com",
             "yahoo.com",
             "amazon.com",
