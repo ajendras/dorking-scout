@@ -200,9 +200,9 @@ class SearchClient:
         empty responses from real search engines.
 
         Returns:
-            Sorted list of unique, clean second-level domains.
+            Sorted list of unique, clean domains.
         """
-        if not html or len(html.strip()) < 50:
+        if not html or len(html.strip()) < 20:
             return []
 
         soup = BeautifulSoup(html, "html.parser")
@@ -293,12 +293,11 @@ class SearchClient:
         return sorted(valid)
 
     def _extract_domain(self, url_or_href: str) -> Optional[str]:
-        """Return the second-level domain from a URL string or None.
+        """Return the domain (including subdomain if present) from a URL string or None.
 
-        Uses stdlib urlparse for robustness (replaces fragile regex). Takes
-        the last two hostname parts to guarantee a second-level domain that
-        satisfies the DiscoveryResult model validator. Returns None for
-        obviously invalid input (e.g. "not-a-url", localhost, bare IPs).
+        Uses stdlib urlparse for robustness (replaces fragile regex). Strips
+        common 'www.' prefix. Returns None for obviously invalid input
+        (IPs, localhost, bare IPs, non-strings).
         """
         if not url_or_href or not isinstance(url_or_href, str):
             return None
@@ -311,23 +310,25 @@ class SearchClient:
             if not parsed.hostname:
                 return None
             hostname = parsed.hostname.lower()
-            parts = hostname.split(".")
-            if len(parts) >= 2:
-                return ".".join(parts[-2:])
-            return None
+            if hostname.replace(".", "").isdigit() or hostname == "localhost":
+                return None
+            if hostname.startswith("www."):
+                hostname = hostname[4:]
+            return hostname
         except Exception:  # pylint: disable=broad-except
             # Fallback to original regex for any edge cases
             match = re.search(
                 r"(?:https?://)?(?:www\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-                r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+)",
+                r"(?:\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z]{2,})",
                 url_or_href,
                 re.IGNORECASE,
             )
             if match:
                 domain = match.group(1).lower()
-                parts = domain.split(".")
-                if len(parts) >= 2:
-                    return ".".join(parts[-2:])
+                if domain.replace(".", "").isdigit() or domain == "localhost":
+                    return None
+                if domain.startswith("www."):
+                    domain = domain[4:]
                 return domain
             return None
 

@@ -59,8 +59,8 @@ class DiscoveryResult(BaseModel):
     domain: str = Field(
         ...,
         min_length=4,
-        pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.([a-z]{2,})$",
-        description="Second-level domain (lowercase, no protocol or path)",
+        pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\.([a-z]{2,})$",
+        description="Domain (second-level or subdomain, lowercase, no protocol or path)",
     )
     tech: List[str] = Field(
         default_factory=list,
