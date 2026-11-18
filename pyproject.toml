@@ -9,7 +9,7 @@ description = "Discover unique websites by tech stack, payment gateway or produc
 authors = [{ name = "Dork Scout Team" }]
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
 dependencies = [
     "fastapi>=0.104.1",
     "uvicorn[standard]>=0.24.0",
@@ -25,3 +25,6 @@ dork-scout = "dorkscout.main:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"
