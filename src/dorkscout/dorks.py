@@ -96,14 +96,14 @@ def build_query(dork: DorkPattern, term: str = "") -> str:
     """Construct a final search-engine query from a dork pattern and optional term.
 
     The dork.signature already contains strong operators and noise exclusions.
-    When a term is supplied it is appended (implicit AND) so the caller can
-    further narrow results (e.g. a product vertical that is not already
-    encoded in the dork). The returned string is safe to pass directly to
-    search engines.
+    When a term is supplied it is quoted (unless already quoted by the caller)
+    and appended (implicit AND). This ensures the term is treated as a phrase
+    for better precision on both single-word and multi-word inputs. The
+    returned string is safe to pass directly to search engines.
 
     Args:
         dork: Validated DorkPattern instance.
-        term: Additional keyword or phrase (e.g. "handmade", "vintage").
+        term: Additional keyword or phrase (e.g. "handmade", "vintage leather").
             Whitespace is normalised; empty strings are ignored.
 
     Returns:
@@ -116,9 +116,9 @@ def build_query(dork: DorkPattern, term: str = "") -> str:
 
     cleaned_term = (term or "").strip()
     if cleaned_term:
-        # Surround multi-word terms with quotes for precision
-        if " " in cleaned_term and not (
-            cleaned_term.startswith('"') and cleaned_term.endswith('"')
+        if not (
+            (cleaned_term.startswith('"') and cleaned_term.endswith('"'))
+            or (cleaned_term.startswith("'") and cleaned_term.endswith("'"))
         ):
             cleaned_term = f'"{cleaned_term}"'
         query = f"{query} {cleaned_term}"

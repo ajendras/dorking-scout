@@ -111,6 +111,8 @@ async def main():
     client = SearchClient(timeout=10.0)
     
     query = build_query(patterns[0], "coffee")
+    # query now automatically quotes the term for precision:
+    # e.g. '"powered by shopify" OR ".myshopify.com" "coffee"'
     domains = await client.search_with_rate_limit(query, patterns[0].engine)
     
     print("Discovered domains:", domains[:5])
@@ -136,7 +138,7 @@ The server can also be started with `dork-scout` and used via the browser or `/a
 python examples/discover_payments.py
 ```
 
-This script uses `get_dorks(tech="Stripe")`, appends a gift-card term via `build_query()`, runs searches through `SearchClient.search_with_rate_limit()`, applies `detect_technologies()` and writes a CSV using `DiscoveryResult` objects.
+This script uses `get_dorks(tech="Stripe")`, appends a gift-card term via `build_query()` (which now consistently quotes the supplied term as a phrase), runs searches through `SearchClient.search_with_rate_limit()`, applies `detect_technologies()` and writes a CSV using `DiscoveryResult` objects.
 
 ### Niche product search
 
@@ -181,7 +183,7 @@ Validation enforces:
 - Consistent `tech_to_category` mapping
 - Non-empty patterns and known categories
 
-See `tests/test_dorks.py` for the validation test suite. New contributions must pass these checks (and the existing test suite). `get_tech_to_category()` and `get_dorks()` automatically pick up extensions.
+See `tests/test_dorks.py` for the validation test suite. New contributions must pass these checks (and the existing test suite). `get_tech_to_category()` and `get_dorks()` automatically pick up extensions. The `build_query()` helper now always quotes additional terms (single- or multi-word) unless already quoted.
 
 </details>
 
@@ -194,6 +196,7 @@ See `tests/test_dorks.py` for the validation test suite. New contributions must 
 <tr><td><code>validate_dork_database()</code></td><td>runs on import</td><td>Pydantic + custom checks for dorks, categories and mappings. Enables safe community extensions (see tests).</td></tr>
 <tr><td><code>TECH_TO_CATEGORY</code></td><td>Now part of DB (extensible)</td><td>Links tech names to categories; new techs require a mapping entry in <code>dorks.json</code></td></tr>
 <tr><td><code>timeout</code> (SearchClient)</td><td>12.0</td><td>httpx timeout passed to <code>AsyncClient</code></td></tr>
+<tr><td><code>build_query()</code></td><td>—</td><td>Now consistently quotes the supplied <code>term</code> as a phrase for improved precision on both single- and multi-word inputs (updated in v0.1.0 CI fixes).</td></tr>
 </table>
 
 ## 🧩 Architecture
@@ -243,7 +246,7 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 pytest
 ```
 
-The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling, `parse_results()` with mocked Google/Bing HTML, noise-domain removal, `detect_technologies()` signature matching, error cases and Pydantic validation.
+The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching, error cases and Pydantic validation. All CI tests now pass.
 
 ## 📍 Roadmap
 <!-- roadmap:start -->

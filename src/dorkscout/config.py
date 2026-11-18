@@ -260,11 +260,11 @@ def validate_dork_database(db: Optional[Dict[str, Any]] = None) -> None:
                 f"Known: {sorted(valid_categories)}"
             )
 
-    # Validate every dork pattern
+    # Validate every dork pattern (structure, Pydantic model, engine).
+    # Done before tech-mapping coverage so engine errors surface first
+    # (satisfies test_validation_fails_on_bad_engine even for unmapped tech).
     valid_engines = {"google", "bing", "duckduckgo", "baidu", "yandex"}
     for tech, pattern_list in dorks_dict.items():
-        if tech not in tech_map:
-            raise ValueError(f"Tech '{tech}' not present in tech_to_category mapping")
         if not isinstance(pattern_list, list) or len(pattern_list) == 0:
             raise ValueError(f"Tech '{tech}' must have at least one dork pattern (list)")
         for i, raw_pattern in enumerate(pattern_list):
@@ -282,6 +282,11 @@ def validate_dork_database(db: Optional[Dict[str, Any]] = None) -> None:
                     f"Invalid engine '{eng}' for '{tech}' pattern {i}. "
                     f"Valid: {valid_engines}"
                 )
+
+    # Validate all dork techs have a mapping entry
+    for tech in dorks_dict:
+        if tech not in tech_map:
+            raise ValueError(f"Tech '{tech}' not present in tech_to_category mapping")
 
 
 def get_dork_db() -> Dict[str, Any]:

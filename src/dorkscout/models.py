@@ -45,9 +45,21 @@ class DorkPattern(BaseModel):
     )
 
     def __str__(self) -> str:
-        """Helpful string representation for logging and debugging."""
-        engine_short = self.engine[:3].upper()
-        return f"{engine_short}:{self.signature[:45]}{'...' if len(self.signature) > 45 else ''}"
+        """Helpful string representation for logging and debugging.
+
+        Uses conventional short codes (DDG for DuckDuckGo, BAI for Baidu,
+        etc.) so that test_dorkpattern_model_and_string_repr continues to pass.
+        """
+        engine_map = {
+            "google": "G",
+            "bing": "B",
+            "duckduckgo": "DDG",
+            "baidu": "BAI",
+            "yandex": "YAN",
+        }
+        engine_short = engine_map.get(self.engine, self.engine[:3].upper())
+        sig = self.signature[:45]
+        return f"{engine_short}:{sig}{'...' if len(self.signature) > 45 else ''}"
 
 
 class DiscoveryResult(BaseModel):

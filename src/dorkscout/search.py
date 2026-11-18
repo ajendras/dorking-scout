@@ -190,7 +190,9 @@ class SearchClient:
     def parse_results(self, html: str, engine: str = "google") -> List[str]:
         """Parse search-engine HTML and extract a deduplicated list of domains.
 
-        Engine-specific heuristics are used for link extraction. All domains
+        Engine-specific heuristics are used for link extraction, including
+        redirect parameters for Baidu (/link?url=) and Yandex (url=/to=)
+        as well as fallback to link text when the href is opaque. All domains
         are passed through _is_valid_domain() which removes marketplaces,
         search-engine domains and other low-value results. The extractor
         always returns second-level domains for consistency with DiscoveryResult.
@@ -251,34 +253,54 @@ class SearchClient:
         elif engine == "baidu":
             for a_tag in soup.select("a[href]"):
                 href = a_tag.get("href", "")
+                added = False
                 if "/link?url=" in href or "url=" in href:
-                    match = re.search(r"url=([^&]+)", href)
+                    match = re.search(r"url=([^&]+)", href, re.IGNORECASE)
                     if match:
                         url = match.group(1)
-                        # basic unescape for common entities
+                        # unescape common entities
                         url = (
                             url.replace("%3A", ":")
                             .replace("%2F", "/")
                             .replace("%3F", "?")
+                            .replace("%26", "&")
+                            .replace("%3D", "=")
                         )
                         domain = self._extract_domain(url)
                         if domain:
                             domains.add(domain)
-                elif href.startswith(("http", "//")):
+                            added = True
+                if not added and href.startswith(("http://", "https://", "//")):
                     domain = self._extract_domain(href)
                     if domain:
                         domains.add(domain)
+                        added = True
+                # Baidu often puts the target URL in the link text for redirector links
+                if not added:
+                    text = a_tag.get_text().strip()
+                    if text.startswith(("http", "//")) or re.search(
+                        r"^[a-z0-9-]+\.[a-z]{2,}", text, re.IGNORECASE
+                    ):
+                        domain = self._extract_domain(text)
+                        if domain:
+                            domains.add(domain)
 
         elif engine == "yandex":
             for a_tag in soup.select("a[href]"):
                 href = a_tag.get("href", "")
-                if "url=" in href or "to=" in href:
-                    match = re.search(r"(https?://[^&]+)", href)
-                    if match:
-                        domain = self._extract_domain(match.group(1))
-                        if domain:
-                            domains.add(domain)
-                elif href.startswith(("http://", "https://")) and "yandex" not in href.lower():
+                # Yandex uses redirect params like ?url=https://... or to=
+                match = re.search(
+                    r'(?:url|to|link)=((https?://|//)[^&\s\'"]+)', href, re.IGNORECASE
+                )
+                if match:
+                    target = match.group(1)
+                    if target.startswith("//"):
+                        target = "https:" + target
+                    domain = self._extract_domain(target)
+                    if domain:
+                        domains.add(domain)
+                    continue
+                if href.startswith(("http://", "https://")) and "yandex" not in href.lower():
                     domain = self._extract_domain(href)
                     if domain:
                         domains.add(domain)
@@ -297,23 +319,29 @@ class SearchClient:
 
         Uses stdlib urlparse for robustness (replaces fragile regex). Strips
         common 'www.' prefix. Returns None for obviously invalid input
-        (IPs, localhost, bare IPs, non-strings).
+        (IPs, localhost, bare hostnames without a TLD, non-strings). Updated
+        to satisfy test_extract_domain_various_cases for "not-a-domain".
         """
         if not url_or_href or not isinstance(url_or_href, str):
             return None
 
         try:
             # Normalise to full URL for urlparse
-            if "://" not in url_or_href:
+            if "://" not in url_or_href and not url_or_href.startswith("//"):
                 url_or_href = "https://" + url_or_href.lstrip("/")
             parsed = urlparse(url_or_href)
             if not parsed.hostname:
                 return None
             hostname = parsed.hostname.lower()
-            if hostname.replace(".", "").isdigit() or hostname == "localhost":
+            if (
+                hostname.replace(".", "").isdigit()
+                or hostname in ("localhost", "localhost.localdomain")
+            ):
                 return None
             if hostname.startswith("www."):
                 hostname = hostname[4:]
+            if "." not in hostname:
+                return None
             return hostname
         except Exception:  # pylint: disable=broad-except
             # Fallback to original regex for any edge cases
@@ -325,7 +353,11 @@ class SearchClient:
             )
             if match:
                 domain = match.group(1).lower()
-                if domain.replace(".", "").isdigit() or domain == "localhost":
+                if (
+                    domain.replace(".", "").isdigit()
+                    or domain in ("localhost", "localhost.localdomain")
+                    or "." not in domain
+                ):
                     return None
                 if domain.startswith("www."):
                     domain = domain[4:]
