@@ -7,37 +7,29 @@ input validation and return properly typed Pydantic models.
 
 from typing import Dict, List, Optional
 
-from .config import get_dork_db
+from .config import get_dork_db, validate_dork_database
 from .models import DorkPattern
-
-# Hard-coded mapping from technology keys to their logical category.
-# This is derived from the curated DEFAULT_DORK_DB and allows get_dorks()
-# to return relevant patterns when a category filter is supplied.
-# A dorks.json override can extend the dork database but must respect
-# these category keys for the mapping to remain consistent.
-TECH_TO_CATEGORY: Dict[str, str] = {
-    "Stripe": "payment_gateways",
-    "PayPal": "payment_gateways",
-    "Square": "payment_gateways",
-    "Shopify": "platforms",
-    "WooCommerce": "platforms",
-    "Books": "niches",
-    "Shoes": "niches",
-    "Gift Cards": "niches",
-}
 
 
 def load_dorks() -> Dict:
     """Return the complete dork database (categories + dorks).
 
-    The returned dict is a merge of the embedded defaults and any
-    dorks.json file present at project root. Used internally by
-    get_dorks() and exposed for advanced use in example scripts.
-
-    Returns:
-        Dict containing 'categories' and 'dorks' keys.
+    The returned dict is a deep merge of the embedded defaults and any
+    dorks.json file present at project root. The database is validated
+    on import (see validate_dork_database() and tests/test_dorks.py).
+    Used internally by get_dorks() and exposed for advanced use in
+    example scripts.
     """
     return get_dork_db()
+
+
+def get_tech_to_category() -> Dict[str, str]:
+    """Return tech-to-category mapping loaded from the (validated) database.
+
+    Community extensions can add new techs by supplying both dork patterns
+    and a mapping entry in dorks.json.
+    """
+    return load_dorks().get("tech_to_category", {})
 
 
 def get_dorks(
@@ -47,7 +39,7 @@ def get_dorks(
 
     Exactly one of category or tech may be supplied. When neither is given
     all patterns are returned. Patterns are converted into validated
-    DorkPattern models.
+    DorkPattern models. The underlying database is validated on load.
 
     Args:
         category: One of 'payment_gateways', 'platforms', 'niches'.
@@ -66,6 +58,7 @@ def get_dorks(
 
     db = load_dorks()
     dork_data: Dict[str, List[Dict]] = db.get("dorks", {})
+    tech_to_category = get_tech_to_category()
 
     patterns: List[DorkPattern] = []
 
@@ -80,12 +73,12 @@ def get_dorks(
         return patterns
 
     if category:
-        if category not in TECH_TO_CATEGORY.values():
-            valid = sorted(set(TECH_TO_CATEGORY.values()))
+        valid = sorted(set(tech_to_category.values()))
+        if category not in valid:
             raise ValueError(f"Unknown category '{category}'. Valid: {valid}")
 
         # Collect every tech that belongs to the requested category
-        for t, cat in TECH_TO_CATEGORY.items():
+        for t, cat in tech_to_category.items():
             if cat == category and t in dork_data:
                 for raw in dork_data[t]:
                     patterns.append(DorkPattern.model_validate(raw))
@@ -163,5 +156,5 @@ __all__ = [
     "build_query",
     "get_category_info",
     "list_all_techs",
-    "TECH_TO_CATEGORY",
+    "get_tech_to_category",
 ]

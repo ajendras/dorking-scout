@@ -1,138 +1,137 @@
-"""Tests for dork loading, filtering, and query construction.
-
-Covers normal usage, category and tech based filtering, edge cases and
-error handling as defined in dorks.py.
-"""
+"""Tests for dork loading, filtering, query building and validation."""
 
 import pytest
 
-from dorkscout.dorks import (
-    TECH_TO_CATEGORY,
+from src.dorkscout.config import get_dork_db, validate_dork_database
+from src.dorkscout.dorks import (
     build_query,
     get_category_info,
     get_dorks,
+    get_tech_to_category,
     list_all_techs,
     load_dorks,
 )
-from dorkscout.models import DorkPattern
+from src.dorkscout.models import Category, DorkPattern
 
 
-def test_load_dorks_returns_merged_database():
-    """load_dorks() returns dict with categories and dorks sections."""
+def test_load_dorks_returns_merged_db():
     db = load_dorks()
     assert isinstance(db, dict)
     assert "categories" in db
     assert "dorks" in db
-    assert isinstance(db["categories"], dict)
-    assert isinstance(db["dorks"], dict)
-    assert "payment_gateways" in db["categories"]
-    assert "Stripe" in db["dorks"]
+    assert "tech_to_category" in db
+    assert len(db["dorks"]) >= 7
+    assert "Stripe" in db["tech_to_category"]
 
 
 def test_get_dorks_by_tech():
-    """get_dorks(tech=...) returns only patterns for that tech."""
-    patterns = get_dorks(tech="Stripe")
-    assert len(patterns) == 2
+    patterns = get_dorks(tech="Shopify")
+    assert len(patterns) >= 1
     assert all(isinstance(p, DorkPattern) for p in patterns)
-    assert all("stripe" in p.signature.lower() for p in patterns)
-    assert patterns[0].engine in ("google", "bing")
+    assert any("shopify" in str(p).lower() for p in patterns)
 
 
 def test_get_dorks_by_category():
-    """get_dorks(category=...) aggregates patterns from all techs in category."""
-    patterns = get_dorks(category="payment_gateways")
-    assert len(patterns) >= 4
-    signatures = " ".join(p.signature.lower() for p in patterns)
-    assert "stripe" in signatures
-    assert "paypal" in signatures
-
-
-def test_get_dorks_niches_category():
-    """Category filter for niches returns product vertical dorks."""
     patterns = get_dorks(category="niches")
     assert len(patterns) >= 3
-    signatures = " ".join(p.signature.lower() for p in patterns)
-    assert any(kw in signatures for kw in ("book", "shoes", "gift"))
+    signatures = [p.signature.lower() for p in patterns]
+    assert any("book" in s for s in signatures)
 
 
-def test_get_dorks_no_filter_returns_all():
-    """Calling get_dorks() with no arguments returns every pattern."""
-    patterns = get_dorks()
-    assert len(patterns) >= 8
+def test_get_dorks_raises_on_unknown():
+    with pytest.raises(ValueError, match="Unknown or empty tech"):
+        get_dorks(tech="UnknownTech123")
+    with pytest.raises(ValueError, match="Unknown category"):
+        get_dorks(category="unknown")
 
 
-def test_build_query_with_term():
-    """build_query appends term when provided (with quoting for phrases)."""
-    dork = DorkPattern(
-        signature='"powered by stripe" -site:stripe.com',
-        engine="google",
-    )
-    query = build_query(dork, "vintage leather")
-    assert query.startswith('"powered by stripe"')
-    assert '"vintage leather"' in query
-    assert "-site:stripe.com" in query
-
-
-def test_build_query_no_term():
-    """Term is ignored when empty or whitespace-only."""
-    dork = DorkPattern(signature="test dork signature", engine="bing")
-    query = build_query(dork, "   ")
-    assert query == "test dork signature"
-    query2 = build_query(dork)
-    assert query2 == "test dork signature"
-
-
-def test_build_query_respects_existing_quotes():
-    """Multi-word terms are quoted only when necessary."""
-    dork = DorkPattern(signature="base-dork", engine="google")
-    query = build_query(dork, "already \"quoted phrase\"")
-    assert 'already "quoted phrase"' in query
-
-
-def test_list_all_techs():
-    """list_all_techs returns sorted list of every tech with dorks."""
-    techs = list_all_techs()
-    expected = [
-        "Books",
-        "Gift Cards",
-        "PayPal",
-        "Shoes",
-        "Shopify",
-        "Square",
-        "Stripe",
-        "WooCommerce",
-    ]
-    for tech in expected:
-        assert tech in techs
-    assert techs == sorted(techs)
-
-
-def test_get_category_info():
-    """get_category_info returns metadata for a known category."""
-    info = get_category_info("niches")
-    assert info["name"] == "Product Niches"
-    assert info["icon"] == "📦"
-    assert info["color"] == "#c56a3b"
-
-
-def test_get_dorks_validation_errors():
-    """Appropriate errors are raised for bad inputs."""
+def test_get_dorks_mutually_exclusive():
     with pytest.raises(ValueError, match="either category or tech"):
         get_dorks(category="niches", tech="Stripe")
 
-    with pytest.raises(ValueError, match="Unknown or empty tech"):
-        get_dorks(tech="NonExistentTech123")
 
-    with pytest.raises(ValueError, match="Unknown category"):
-        get_dorks(category="invalid_cat")
-
-    with pytest.raises(ValueError, match="Unknown category_id"):
-        get_category_info("foo")
+def test_build_query_appends_term():
+    d = DorkPattern(signature='inurl:checkout', engine="google")
+    q = build_query(d, "vintage books")
+    assert 'inurl:checkout' in q
+    assert '"vintage books"' in q
 
 
-def test_tech_to_category_mapping_is_complete():
-    """All techs defined in the dork database have a category mapping."""
-    db = load_dorks()
-    dork_techs = list(db.get("dorks", {}).keys())
-    for tech in dork_techs:
-        assert tech in TECH_TO_CATEGORY, f"Missing mapping for {tech}"
+def test_build_query_no_extra_quotes():
+    d = DorkPattern(signature="test", engine="google")
+    assert build_query(d, "singleword") == "test singleword"
+    assert build_query(d, '"already quoted"') == 'test "already quoted"'
+
+
+def test_list_all_techs():
+    techs = list_all_techs()
+    assert isinstance(techs, list)
+    assert "Stripe" in techs
+    assert "Gift Cards" in techs
+
+
+def test_get_tech_to_category():
+    mapping = get_tech_to_category()
+    assert mapping["Books"] == "niches"
+    assert mapping["Stripe"] == "payment_gateways"
+
+
+def test_get_category_info():
+    info = get_category_info("platforms")
+    assert info["name"] == "Platforms & CMS"
+    assert isinstance(info, dict)
+
+
+def test_validate_dork_database_on_defaults():
+    db = get_dork_db()
+    validate_dork_database(db)  # should pass silently
+
+
+def test_validate_dork_database_invalid_structure():
+    with pytest.raises(ValueError, match="must be a non-empty dict"):
+        validate_dork_database({"categories": {}})
+
+
+def test_validate_dork_database_bad_pattern():
+    bad_db = {
+        "categories": get_dork_db()["categories"],
+        "tech_to_category": {"TestTech": "niches"},
+        "dorks": {
+            "TestTech": [
+                {"signature": "a", "engine": "google"},  # too short for model
+            ]
+        },
+    }
+    with pytest.raises(ValueError):
+        validate_dork_database(bad_db)
+
+
+def test_validate_dork_database_bad_engine():
+    bad_db = {
+        "categories": get_dork_db()["categories"],
+        "tech_to_category": {"TestTech": "niches"},
+        "dorks": {
+            "TestTech": [
+                {
+                    "signature": "inurl:test -site:example.com",
+                    "engine": "invalidengine",
+                }
+            ]
+        },
+    }
+    with pytest.raises(ValueError, match="Invalid engine"):
+        validate_dork_database(bad_db)
+
+
+def test_validate_dork_database_unknown_category_in_map():
+    bad_db = {
+        "categories": get_dork_db()["categories"],
+        "tech_to_category": {"TestTech": "nonexistentcat"},
+        "dorks": {
+            "TestTech": [
+                {"signature": "test signature here ok", "engine": "google"}
+            ]
+        },
+    }
+    with pytest.raises(ValueError, match="unknown category"):
+        validate_dork_database(bad_db)

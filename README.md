@@ -173,7 +173,15 @@ The endpoint uses the same `get_dorks()` + `SearchClient` flow but limits detect
 
 <details><summary>Extending the dork database</summary>
 
-Place a `dorks.json` in the project root matching the shape of `DEFAULT_DORK_DB`. It is automatically merged by `config._load_json_override()` and picked up by `load_dorks()` and `get_dorks()`.
+Community PRs can extend the dork database by placing a `dorks.json` in the project root (or editing `DEFAULT_DORK_DB` in `config.py`). The loader now performs a **deep merge** (new techs/patterns are added; duplicate signatures are skipped) and the database is automatically validated on import by `validate_dork_database()`.
+
+Validation enforces:
+- Pydantic models for every `Category` and `DorkPattern`
+- Valid engines (google|bing|duckduckgo|baidu|yandex)
+- Consistent `tech_to_category` mapping
+- Non-empty patterns and known categories
+
+See `tests/test_dorks.py` for the validation test suite. New contributions must pass these checks (and the existing test suite). `get_tech_to_category()` and `get_dorks()` automatically pick up extensions.
 
 </details>
 
@@ -181,9 +189,10 @@ Place a `dorks.json` in the project root matching the shape of `DEFAULT_DORK_DB`
 
 <table>
 <tr><th>Option</th><th>Default</th><th>Description</th></tr>
-<tr><td><code>DORKS_JSON_PATH</code></td><td><code>./dorks.json</code></td><td>Optional file that extends or overrides <code>DEFAULT_DORK_DB</code> (loaded by <code>config.py</code>)</td></tr>
+<tr><td><code>DORKS_JSON_PATH</code></td><td><code>./dorks.json</code></td><td>Optional file that extends or overrides <code>DEFAULT_DORK_DB</code> (loaded by <code>config.py</code> with deep merge)</td></tr>
 <tr><td><code>SEARCH_ENGINES</code></td><td>Google, Bing, DuckDuckGo, Baidu, Yandex</td><td>List of dicts with <code>base</code>, <code>query_param</code> and <code>rate_limit</code> used by <code>SearchClient</code> (full scraping support for all engines)</td></tr>
-<tr><td><code>TECH_TO_CATEGORY</code></td><td>Hard-coded mapping</td><td>Links tech names (Stripe, Shopify, Books…) to categories for <code>get_dorks(category=...)</code></td></tr>
+<tr><td><code>validate_dork_database()</code></td><td>runs on import</td><td>Pydantic + custom checks for dorks, categories and mappings. Enables safe community extensions (see tests).</td></tr>
+<tr><td><code>TECH_TO_CATEGORY</code></td><td>Now part of DB (extensible)</td><td>Links tech names to categories; new techs require a mapping entry in <code>dorks.json</code></td></tr>
 <tr><td><code>timeout</code> (SearchClient)</td><td>12.0</td><td>httpx timeout passed to <code>AsyncClient</code></td></tr>
 </table>
 
@@ -240,7 +249,7 @@ The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks(
 <!-- roadmap:start -->
 - [x] **v0.1.0** — first release: Curated Dorks, Multi-Engine, Niche Explorer, API-less Scan
 - [x] Add support for Baidu and Yandex result scraping
-- [ ] Allow community PRs to extend dork database with validation tests
+- [x] Allow community PRs to extend dork database with validation tests
 - [ ] Persistent SQLite store for discovered domains with search history
 - [ ] Add domain age and SSL cert metadata enrichment using free sources
 - [ ] Implement local LLM helper to generate new dorks for unknown tech

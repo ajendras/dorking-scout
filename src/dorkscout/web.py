@@ -11,9 +11,9 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from .dorks import (
-    TECH_TO_CATEGORY,
     get_category_info,
     get_dorks,
+    get_tech_to_category,
     list_all_techs,
     load_dorks,
 )
@@ -69,9 +69,10 @@ def category_page(request: Request, category_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     # Filter techs that belong to this category
+    tech_to_cat = get_tech_to_category()
     relevant_techs = [
         tech
-        for tech, cat in TECH_TO_CATEGORY.items()
+        for tech, cat in tech_to_cat.items()
         if cat == category_id
     ]
 
