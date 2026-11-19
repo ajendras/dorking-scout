@@ -103,7 +103,7 @@ Requires Python 3.9+ and no external services.
 
 ```bash
 git clone https://github.com/ajendras/dorking-scout.git
-cd dork-scout
+cd dorking-scout
 pip install -e .
 ```
 
