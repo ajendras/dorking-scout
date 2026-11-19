@@ -1,10 +1,9 @@
-"""Persistent SQLite store for discovered domains and search history.
+"""Persistent SQLite store for search history and discovered domains.
 
-Implements a lightweight, zero-dependency store using stdlib sqlite3.
-Two tables track searches (with query metadata) and unique domains (with
-first/last seen timestamps, detection count and tech list stored as JSON).
-The store is attached to FastAPI app.state.store and used by /api/search,
-/api/history and /api/domains. Supports ":memory:" for tests.
+DiscoveryStore provides methods to record searches, upsert domains with
+first_seen / last_seen / seen_count tracking and tech accumulation. Supports
+both file-based persistence (default dorkscout.db) and in-memory mode for
+testing. Tables are created automatically on initialization.
 """
 
 import json
@@ -18,55 +17,60 @@ from .models import DiscoveryResult
 
 
 class DiscoveryStore:
-    """SQLite-backed persistent storage for search results and domain history.
+    """SQLite backed store for searches and unique domains with history."""
 
-    Automatically creates the database and tables on first use. Domains are
-    deduplicated across runs; each new sighting increments a seen_count.
-    Tech list is stored as a JSON array. Latest tech detection overwrites
-    on subsequent sightings.
-    """
-
-    def __init__(self, db_path: Optional[Union[Path, str]] = None) -> None:
-        """Initialise store with optional custom path (use ':memory:' for tests)."""
+    def __init__(self, db_path: Optional[Union[str, Path]] = None) -> None:
+        """Initialize store, create tables. For ':memory:' keeps a live connection."""
         if db_path is None:
-            self.db_path: Union[Path, str] = get_db_path()
+            self.db_path: Union[str, Path] = get_db_path()
         elif isinstance(db_path, str) and db_path == ":memory:":
             self.db_path = ":memory:"
         else:
-            self.db_path = Path(db_path) if isinstance(db_path, (str, Path)) else db_path
+            self.db_path = Path(db_path) if isinstance(db_path, str) else db_path
 
-        self._init_db()
+        self._conn: Optional[sqlite3.Connection] = None
+        if self.db_path == ":memory:":
+            self._conn = sqlite3.connect(":memory:", check_same_thread=False)
+            self._init_tables()
+        else:
+            self._init_tables()
 
-    def _init_db(self) -> None:
-        """Create tables and indexes if they do not exist."""
-        conn_path = ":memory:" if self.db_path == ":memory:" else str(self.db_path)
-        with sqlite3.connect(conn_path) as conn:
-            conn.executescript("""
+    def _init_tables(self) -> None:
+        """Create schema if not exists. Uses live conn for memory, new conn for file."""
+        if self.db_path == ":memory:" and self._conn is not None:
+            conn = self._conn
+            close = False
+        else:
+            conn = sqlite3.connect(str(self.db_path))
+            close = True
+
+        try:
+            conn.executescript(
+                """
                 CREATE TABLE IF NOT EXISTS searches (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     query TEXT NOT NULL,
                     category TEXT,
                     tech TEXT,
-                    term TEXT,
+                    term TEXT DEFAULT '',
                     timestamp TEXT NOT NULL,
                     results_count INTEGER DEFAULT 0,
                     engine TEXT DEFAULT 'multi'
                 );
-                CREATE TABLE IF NOT EXISTS discovered_domains (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    domain TEXT UNIQUE NOT NULL,
+
+                CREATE TABLE IF NOT EXISTS domains (
+                    domain TEXT PRIMARY KEY,
                     techs TEXT DEFAULT '[]',
                     first_seen TEXT NOT NULL,
                     last_seen TEXT NOT NULL,
-                    seen_count INTEGER DEFAULT 1,
-                    search_id INTEGER,
-                    FOREIGN KEY(search_id) REFERENCES searches(id)
+                    seen_count INTEGER DEFAULT 1
                 );
-                CREATE INDEX IF NOT EXISTS idx_searches_ts ON searches(timestamp DESC);
-                CREATE INDEX IF NOT EXISTS idx_domains_domain ON discovered_domains(domain);
-                CREATE INDEX IF NOT EXISTS idx_domains_lastseen ON discovered_domains(last_seen DESC);
-            """)
+                """
+            )
             conn.commit()
+        finally:
+            if close:
+                conn.close()
 
     def record_search(
         self,
@@ -87,9 +91,15 @@ class DiscoveryStore:
             return 0
 
         timestamp = datetime.now(timezone.utc).isoformat()
-        conn_path = ":memory:" if self.db_path == ":memory:" else str(self.db_path)
 
-        with sqlite3.connect(conn_path) as conn:
+        if self.db_path == ":memory:" and self._conn is not None:
+            conn = self._conn
+            close_after = False
+        else:
+            conn = sqlite3.connect(str(self.db_path))
+            close_after = True
+
+        try:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -99,39 +109,59 @@ class DiscoveryStore:
                 """,
                 (query, category, tech, term, timestamp, len(results), engine),
             )
-            search_id = cursor.lastrowid
+            search_id = cursor.lastrowid or 0
 
+            now = timestamp
             for result in results:
-                techs_json = json.dumps(result.tech or [])
+                domain = result.domain.lower()
+                tech_list = sorted({t for t in (result.tech or [])})
+                tech_str = json.dumps(tech_list)
+
                 cursor.execute(
-                    """
-                    INSERT INTO discovered_domains
-                    (domain, techs, first_seen, last_seen, seen_count, search_id)
-                    VALUES (?, ?, ?, ?, 1, ?)
-                    ON CONFLICT(domain) DO UPDATE SET
-                        techs = excluded.techs,
-                        last_seen = excluded.last_seen,
-                        seen_count = discovered_domains.seen_count + 1,
-                        search_id = excluded.search_id
-                    """,
-                    (
-                        result.domain,
-                        techs_json,
-                        timestamp,
-                        timestamp,
-                        search_id,
-                    ),
+                    "SELECT techs, first_seen, seen_count FROM domains WHERE domain = ?",
+                    (domain,),
                 )
+                row = cursor.fetchone()
+                if row:
+                    existing_techs: List[str] = json.loads(row[0]) if row[0] else []
+                    merged = sorted(set(existing_techs + tech_list))
+                    merged_str = json.dumps(merged)
+                    new_count = int(row[2]) + 1
+                    cursor.execute(
+                        """
+                        UPDATE domains
+                        SET techs = ?, last_seen = ?, seen_count = ?
+                        WHERE domain = ?
+                        """,
+                        (merged_str, now, new_count, domain),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO domains (domain, techs, first_seen, last_seen, seen_count)
+                        VALUES (?, ?, ?, ?, 1)
+                        """,
+                        (domain, tech_str, now, now),
+                    )
 
             conn.commit()
-            return search_id or 0
+            return search_id
+        finally:
+            if close_after:
+                conn.close()
 
-    def get_search_history(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Return the most recent searches."""
-        conn_path = ":memory:" if self.db_path == ":memory:" else str(self.db_path)
-        with sqlite3.connect(conn_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(
+    def get_search_history(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Return recent searches as list of dicts."""
+        if self.db_path == ":memory:" and self._conn is not None:
+            conn = self._conn
+            close_after = False
+        else:
+            conn = sqlite3.connect(str(self.db_path))
+            close_after = True
+
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
                 """
                 SELECT id, query, category, tech, term, timestamp,
                        results_count, engine
@@ -141,50 +171,111 @@ class DiscoveryStore:
                 """,
                 (limit,),
             )
-            return [dict(row) for row in cursor.fetchall()]
-
-    def get_unique_domains(
-        self, limit: int = 100, tech: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """Return unique domains with their metadata.
-
-        Tech filter performs a substring match on the stored JSON array.
-        """
-        conn_path = ":memory:" if self.db_path == ":memory:" else str(self.db_path)
-        query = """
-            SELECT domain, techs, first_seen, last_seen, seen_count
-            FROM discovered_domains
-        """
-        params: List[Any] = []
-        if tech:
-            query += " WHERE techs LIKE ? "
-            params.append(f'%"{tech}"%')
-        query += " ORDER BY last_seen DESC LIMIT ?"
-        params.append(limit)
-
-        with sqlite3.connect(conn_path) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.execute(query, params)
-            rows = []
-            for row in cursor.fetchall():
-                row_dict = dict(row)
-                try:
-                    row_dict["techs"] = json.loads(row_dict.get("techs", "[]"))
-                except (json.JSONDecodeError, TypeError):
-                    row_dict["techs"] = []
-                rows.append(row_dict)
-            return rows
+            rows = cursor.fetchall()
+            history = []
+            for row in rows:
+                history.append(
+                    {
+                        "id": row[0],
+                        "query": row[1],
+                        "category": row[2],
+                        "tech": row[3],
+                        "term": row[4],
+                        "timestamp": row[5],
+                        "results_count": row[6],
+                        "engine": row[7],
+                    }
+                )
+            return history
+        finally:
+            if close_after:
+                conn.close()
 
     def get_total_unique_domains(self) -> int:
-        """Return total number of unique domains ever discovered."""
-        conn_path = ":memory:" if self.db_path == ":memory:" else str(self.db_path)
-        with sqlite3.connect(conn_path) as conn:
-            cursor = conn.execute("SELECT COUNT(*) FROM discovered_domains")
+        """Return total number of unique domains stored."""
+        if self.db_path == ":memory:" and self._conn is not None:
+            conn = self._conn
+            close_after = False
+        else:
+            conn = sqlite3.connect(str(self.db_path))
+            close_after = True
+
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM domains")
             row = cursor.fetchone()
             return row[0] if row else 0
+        finally:
+            if close_after:
+                conn.close()
+
+    def get_unique_domains(
+        self, limit: int = 50, tech: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Return list of unique domains, optionally filtered by tech."""
+        if self.db_path == ":memory:" and self._conn is not None:
+            conn = self._conn
+            close_after = False
+        else:
+            conn = sqlite3.connect(str(self.db_path))
+            close_after = True
+
+        try:
+            cursor = conn.cursor()
+            if tech:
+                cursor.execute(
+                    """
+                    SELECT domain, techs, first_seen, last_seen, seen_count
+                    FROM domains
+                    """
+                )
+                rows = cursor.fetchall()
+                result: List[Dict[str, Any]] = []
+                t_lower = tech.lower()
+                for row in rows[:limit]:
+                    techs = json.loads(row[1]) if row[1] else []
+                    if any(t_lower == t.lower() for t in techs):
+                        result.append(
+                            {
+                                "domain": row[0],
+                                "techs": techs,
+                                "first_seen": row[2],
+                                "last_seen": row[3],
+                                "seen_count": row[4],
+                            }
+                        )
+                return result
+            else:
+                cursor.execute(
+                    """
+                    SELECT domain, techs, first_seen, last_seen, seen_count
+                    FROM domains
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+                rows = cursor.fetchall()
+                result = []
+                for row in rows:
+                    result.append(
+                        {
+                            "domain": row[0],
+                            "techs": json.loads(row[1]) if row[1] else [],
+                            "first_seen": row[2],
+                            "last_seen": row[3],
+                            "seen_count": row[4],
+                        }
+                    )
+                return result
+        finally:
+            if close_after:
+                conn.close()
 
     def close(self) -> None:
-        """No-op (connections are context-managed)."""
+        """Close the connection if it's the in-memory one."""
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
 
 
 __all__ = ["DiscoveryStore"]

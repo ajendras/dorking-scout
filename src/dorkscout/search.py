@@ -10,13 +10,139 @@ social platforms). The SearchClient is used by background workers and the
 import asyncio
 import re
 from typing import Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
 
 from .config import get_search_engines
 from .models import DiscoveryResult
+
+NOISE_DOMAINS: set[str] = {
+    "amazon.com",
+    "amazon.co.uk",
+    "ebay.com",
+    "ebay.co.uk",
+    "etsy.com",
+    "walmart.com",
+    "target.com",
+    "aliexpress.com",
+    "facebook.com",
+    "instagram.com",
+    "twitter.com",
+    "t.co",
+    "linkedin.com",
+    "pinterest.com",
+    "youtube.com",
+    "github.com",
+    "gitlab.com",
+    "wordpress.com",
+    "blogspot.com",
+    "medium.com",
+    "tumblr.com",
+    "stripe.com",
+    "paypal.com",
+    "square.com",
+    "shopify.com",
+    "duckduckgo.com",
+    "google.com",
+    "bing.com",
+    "baidu.com",
+    "yandex.com",
+    "wikipedia.org",
+}
+
+
+def _normalize_domain(url: str) -> Optional[str]:
+    """Return cleaned lowercase domain from URL (supports uddg redirects)."""
+    if not url:
+        return None
+    try:
+        if "uddg=" in url:
+            qs = parse_qs(urlparse(url).query)
+            if "uddg" in qs:
+                url = unquote(qs["uddg"][0])
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url.lstrip("/")
+        parsed = urlparse(url)
+        domain = parsed.netloc
+        if not domain and parsed.path:
+            domain = parsed.path.split("/")[0]
+        if domain.startswith("www."):
+            domain = domain[4:]
+        domain = domain.lower()
+        if domain and "." in domain and len(domain) > 3:
+            return domain
+        return None
+    except Exception:
+        return None
+
+
+def parse_results(engine: str, html: str) -> List[str]:
+    """Parse search engine results page HTML and return clean domains.
+
+    Uses engine-specific logic (including DuckDuckGo uddg redirect handling).
+    Noise domains are filtered. Returns unique second-level/sub domains.
+    """
+    if not html or not isinstance(html, str):
+        return []
+
+    soup = BeautifulSoup(html, "html.parser")
+    links: List[str] = []
+    engine_lower = engine.lower()
+
+    if engine_lower == "google":
+        for a in soup.select("a[href]"):
+            href = a.get("href", "")
+            if "/url?q=" in href:
+                try:
+                    real = href.split("/url?q=")[1].split("&")[0]
+                    links.append(real)
+                except Exception:
+                    links.append(href)
+            elif href.startswith("http"):
+                links.append(href)
+    elif engine_lower == "duckduckgo":
+        for a in soup.select("a[href]"):
+            href = a.get("href", "")
+            if not href:
+                continue
+            if "uddg=" in href:
+                try:
+                    qs = parse_qs(urlparse(href).query)
+                    if "uddg" in qs:
+                        real = unquote(qs["uddg"][0])
+                        links.append(real)
+                        continue
+                except Exception:
+                    pass
+            if href.startswith(("http", "//")):
+                if href.startswith("//"):
+                    href = "https:" + href
+                links.append(href)
+    else:  # bing, baidu, yandex
+        for a in soup.select("a[href]"):
+            href = a.get("href", "")
+            if href.startswith("http") and not any(
+                bad in href.lower()
+                for bad in ("bing.com", "baidu.com", "yandex.", "duckduckgo.com")
+            ):
+                links.append(href)
+
+    domains: List[str] = []
+    seen: set[str] = set()
+    for link in links:
+        domain = _normalize_domain(link)
+        if (
+            domain
+            and domain not in seen
+            and domain not in NOISE_DOMAINS
+            and not any(n in domain for n in NOISE_DOMAINS if n != domain)
+        ):
+            seen.add(domain)
+            domains.append(domain)
+
+    return domains
 
 
 class SearchClient:
@@ -41,421 +167,47 @@ class SearchClient:
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/120.0 Safari/537.36"
                 ),
-                "Accept": "text/html,application/xhtml+xml,application/xml",
-                "Accept-Language": "en-US,en;q=0.9",
             },
             follow_redirects=True,
-            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
         )
-
-        engines = get_search_engines()
-        self.engine_configs: Dict[str, Dict] = {
-            e["name"].lower(): e for e in engines
-        }
-
-        self.noise_domains = {
-            "google.com",
-            "bing.com",
-            "duckduckgo.com",
-            "yandex.com",
-            "yandex.ru",
-            "baidu.com",
-            "yahoo.com",
-            "amazon.com",
-            "ebay.com",
-            "etsy.com",
-            "aliexpress.com",
-            "facebook.com",
-            "instagram.com",
-            "twitter.com",
-            "linkedin.com",
-            "pinterest.com",
-            "youtube.com",
-            "github.com",
-            "wordpress.com",
-            "blogspot.com",
-            "wixsite.com",
-            "weebly.com",
-            "myshopify.com",
-            "bigcartel.com",
-            "square.site",
-        }
-
-    async def search_google(self, query: str) -> List[str]:
-        """Execute a Google search and return parsed unique domains.
-
-        Raises:
-            ValueError: if query is empty.
-            httpx errors are caught and logged; an empty list is returned.
-        """
-        if not query or not query.strip():
-            raise ValueError("Search query cannot be empty")
-
-        config = self.engine_configs.get("google", {})
-        base = config.get("base", "https://www.google.com/search")
-        param = config.get("query_param", "q")
-
-        try:
-            resp = await self.client.get(
-                base,
-                params={param: query},
-                headers={"Referer": "https://www.google.com/"},
-            )
-            resp.raise_for_status()
-            return self.parse_results(resp.text, "google")
-        except httpx.HTTPError as exc:
-            # In production a structured logger would be used
-            print(f"Google request failed for query '{query[:60]}...': {exc}")
-            return []
-
-    async def search_bing(self, query: str) -> List[str]:
-        """Execute a Bing search and return parsed unique domains."""
-        if not query or not query.strip():
-            raise ValueError("Search query cannot be empty")
-
-        config = self.engine_configs.get("bing", {})
-        base = config.get("base", "https://www.bing.com/search")
-        param = config.get("query_param", "q")
-
-        try:
-            resp = await self.client.get(base, params={param: query})
-            resp.raise_for_status()
-            return self.parse_results(resp.text, "bing")
-        except httpx.HTTPError as exc:
-            print(f"Bing request failed for query '{query[:60]}...': {exc}")
-            return []
-
-    async def search_duckduckgo(self, query: str) -> List[str]:
-        """Execute a DuckDuckGo HTML search (friendlier for scraping)."""
-        if not query or not query.strip():
-            raise ValueError("Search query cannot be empty")
-
-        config = self.engine_configs.get("duckduckgo", {})
-        base = config.get("base", "https://html.duckduckgo.com/html")
-        param = config.get("query_param", "q")
-
-        try:
-            resp = await self.client.get(base, params={param: query})
-            resp.raise_for_status()
-            return self.parse_results(resp.text, "duckduckgo")
-        except httpx.HTTPError as exc:
-            print(f"DuckDuckGo request failed: {exc}")
-            return []
-
-    async def search_baidu(self, query: str) -> List[str]:
-        """Execute a Baidu search and return parsed unique domains.
-
-        Baidu uses the 'wd' parameter and often wraps links in a /link?url=
-        redirector.
-        """
-        if not query or not query.strip():
-            raise ValueError("Search query cannot be empty")
-
-        config = self.engine_configs.get("baidu", {})
-        base = config.get("base", "https://www.baidu.com/s")
-        param = config.get("query_param", "wd")
-
-        try:
-            resp = await self.client.get(
-                base,
-                params={param: query},
-                headers={"Referer": "https://www.baidu.com/"},
-            )
-            resp.raise_for_status()
-            return self.parse_results(resp.text, "baidu")
-        except httpx.HTTPError as exc:
-            print(f"Baidu request failed for query '{query[:60]}...': {exc}")
-            return []
-
-    async def search_yandex(self, query: str) -> List[str]:
-        """Execute a Yandex search and return parsed unique domains.
-
-        Yandex frequently uses redirect parameters containing the real target URL.
-        """
-        if not query or not query.strip():
-            raise ValueError("Search query cannot be empty")
-
-        config = self.engine_configs.get("yandex", {})
-        base = config.get("base", "https://yandex.com/search")
-        param = config.get("query_param", "text")
-
-        try:
-            resp = await self.client.get(base, params={param: query})
-            resp.raise_for_status()
-            return self.parse_results(resp.text, "yandex")
-        except httpx.HTTPError as exc:
-            print(f"Yandex request failed for query '{query[:60]}...': {exc}")
-            return []
-
-    def parse_results(self, html: str, engine: str = "google") -> List[str]:
-        """Parse search-engine HTML and extract a deduplicated list of domains.
-
-        Engine-specific heuristics are used for link extraction, including
-        redirect parameters for Baidu (/link?url=) and Yandex (url=/to=)
-        as well as fallback to link text when the href is opaque. All domains
-        are passed through _is_valid_domain() which removes marketplaces,
-        search-engine domains and other low-value results. The extractor
-        always returns second-level domains for consistency with DiscoveryResult.
-
-        The HTML length guard has been relaxed to support unit tests that
-        use minimal HTML snippets while still protecting against obviously
-        empty responses from real search engines.
-
-        Returns:
-            Sorted list of unique, clean domains.
-        """
-        if not html or len(html.strip()) < 20:
-            return []
-
-        soup = BeautifulSoup(html, "html.parser")
-        domains: set[str] = set()
-
-        if engine == "google":
-            # Google often wraps real links in a /url?q= redirector
-            for a_tag in soup.find_all("a", href=True):
-                href = a_tag["href"]
-                if "/url?q=" in href:
-                    match = re.search(r"/url\?q=(https?://[^&]+)", href)
-                    if match:
-                        domain = self._extract_domain(match.group(1))
-                        if domain:
-                            domains.add(domain)
-                elif href.startswith(("http://", "https://")):
-                    domain = self._extract_domain(href)
-                    if domain:
-                        domains.add(domain)
-
-        elif engine == "bing":
-            for a_tag in soup.select("a[href^='http'], li.b_algo a"):
-                href = a_tag.get("href", "")
-                if href and not any(x in href for x in ("bing.com", "microsoft.com")):
-                    domain = self._extract_domain(href)
-                    if domain:
-                        domains.add(domain)
-
-        elif engine == "duckduckgo":
-            for a_tag in soup.select("a.result__a, a[href]"):
-                href = a_tag.get("href", "")
-                if "uddg=" in href:
-                    match = re.search(r"uddg=(https?[^&]+)", href)
-                    if match:
-                        url = match.group(1)
-                        # simplistic unescape
-                        url = url.replace("%3A", ":").replace("%2F", "/")
-                        domain = self._extract_domain(url)
-                        if domain:
-                            domains.add(domain)
-                elif href.startswith(("http", "//")):
-                    domain = self._extract_domain(href)
-                    if domain:
-                        domains.add(domain)
-
-        elif engine == "baidu":
-            for a_tag in soup.select("a[href]"):
-                href = a_tag.get("href", "")
-                added = False
-                if "/link?url=" in href or "url=" in href:
-                    match = re.search(r"url=([^&]+)", href, re.IGNORECASE)
-                    if match:
-                        url = match.group(1)
-                        # unescape common entities
-                        url = (
-                            url.replace("%3A", ":")
-                            .replace("%2F", "/")
-                            .replace("%3F", "?")
-                            .replace("%26", "&")
-                            .replace("%3D", "=")
-                        )
-                        domain = self._extract_domain(url)
-                        if domain:
-                            domains.add(domain)
-                            added = True
-                if not added and href.startswith(("http://", "https://", "//")):
-                    domain = self._extract_domain(href)
-                    if domain:
-                        domains.add(domain)
-                        added = True
-                # Baidu often puts the target URL in the link text for redirector links
-                if not added:
-                    text = a_tag.get_text().strip()
-                    if text.startswith(("http", "//")) or re.search(
-                        r"^[a-z0-9-]+\.[a-z]{2,}", text, re.IGNORECASE
-                    ):
-                        domain = self._extract_domain(text)
-                        if domain:
-                            domains.add(domain)
-
-        elif engine == "yandex":
-            for a_tag in soup.select("a[href]"):
-                href = a_tag.get("href", "")
-                # Yandex uses redirect params like ?url=https://... or to=
-                match = re.search(
-                    r'(?:url|to|link)=((https?://|//)[^&\s\'"]+)', href, re.IGNORECASE
-                )
-                if match:
-                    target = match.group(1)
-                    if target.startswith("//"):
-                        target = "https:" + target
-                    domain = self._extract_domain(target)
-                    if domain:
-                        domains.add(domain)
-                    continue
-                if href.startswith(("http://", "https://")) and "yandex" not in href.lower():
-                    domain = self._extract_domain(href)
-                    if domain:
-                        domains.add(domain)
-        else:
-            # Generic fallback for any other engine (Yandex, etc.)
-            for a_tag in soup.find_all("a", href=True):
-                domain = self._extract_domain(a_tag["href"])
-                if domain:
-                    domains.add(domain)
-
-        valid = [d for d in domains if self._is_valid_domain(d)]
-        return sorted(valid)
-
-    def _extract_domain(self, url_or_href: str) -> Optional[str]:
-        """Return the domain (including subdomain if present) from a URL string or None.
-
-        Uses stdlib urlparse for robustness (replaces fragile regex). Strips
-        common 'www.' prefix. Returns None for obviously invalid input
-        (IPs, localhost, bare hostnames without a TLD, non-strings). Updated
-        to satisfy test_extract_domain_various_cases for "not-a-domain".
-        """
-        if not url_or_href or not isinstance(url_or_href, str):
-            return None
-
-        try:
-            # Normalise to full URL for urlparse
-            if "://" not in url_or_href and not url_or_href.startswith("//"):
-                url_or_href = "https://" + url_or_href.lstrip("/")
-            parsed = urlparse(url_or_href)
-            if not parsed.hostname:
-                return None
-            hostname = parsed.hostname.lower()
-            if (
-                hostname.replace(".", "").isdigit()
-                or hostname in ("localhost", "localhost.localdomain")
-            ):
-                return None
-            if hostname.startswith("www."):
-                hostname = hostname[4:]
-            if "." not in hostname:
-                return None
-            return hostname
-        except Exception:  # pylint: disable=broad-except
-            # Fallback to original regex for any edge cases
-            match = re.search(
-                r"(?:https?://)?(?:www\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
-                r"(?:\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z]{2,})",
-                url_or_href,
-                re.IGNORECASE,
-            )
-            if match:
-                domain = match.group(1).lower()
-                if (
-                    domain.replace(".", "").isdigit()
-                    or domain in ("localhost", "localhost.localdomain")
-                    or "." not in domain
-                ):
-                    return None
-                if domain.startswith("www."):
-                    domain = domain[4:]
-                return domain
-            return None
-
-    def _is_valid_domain(self, domain: str) -> bool:
-        """Return True only for plausible, non-noise domains.
-
-        Filters out known marketplaces, search engines, social networks and
-        single-label hostnames.
-        """
-        if not domain or "." not in domain or len(domain) < 5:
-            return False
-
-        for noise in self.noise_domains:
-            if noise in domain or domain.endswith("." + noise):
-                return False
-
-        # Very generic TLD-only or numeric hosts are unlikely to be stores
-        if re.search(r"^\d+\.", domain):
-            return False
-
-        return True
+        self.engines = {e["name"].lower(): e for e in get_search_engines()}
 
     async def search_with_rate_limit(
-        self, query: str, engine: str = "google", delay_override: Optional[float] = None
+        self,
+        query: str,
+        engine_name: str = "google",
+        delay_override: Optional[float] = None,
     ) -> List[str]:
-        """Convenience wrapper that respects the engine's configured rate_limit.
+        """Execute a search against the selected engine and parse results.
 
-        Returns parsed domains after sleeping the required delay. Now supports
-        Baidu and Yandex scraping in addition to the original engines.
+        Applies rate-limit sleep after the request. Returns parsed domains.
         """
-        engine_key = engine.lower()
-        config = self.engine_configs.get(engine_key, {})
-        delay = delay_override or config.get("rate_limit", 1.0)
+        engine_key = engine_name.lower()
+        eng_conf = self.engines.get(engine_key) or self.engines.get("google")
+        if not eng_conf:
+            return []
 
-        if engine_key == "google":
-            domains = await self.search_google(query)
-        elif engine_key == "bing":
-            domains = await self.search_bing(query)
-        elif engine_key == "duckduckgo":
-            domains = await self.search_duckduckgo(query)
-        elif engine_key == "baidu":
-            domains = await self.search_baidu(query)
-        elif engine_key == "yandex":
-            domains = await self.search_yandex(query)
-        else:
-            # Unknown engine falls back to empty result (caller can log)
-            domains = []
+        base_url = eng_conf["base"]
+        q_param = eng_conf["query_param"]
+        delay = delay_override if delay_override is not None else eng_conf.get("rate_limit", 1.0)
 
-        await asyncio.sleep(delay)
-        return domains
-
-    def enrich_with_detection(
-        self, domains: List[str], html_map: Dict[str, str]
-    ) -> List[DiscoveryResult]:
-        """Turn a list of domains into DiscoveryResult objects.
-
-        html_map is a dict of domain -> raw HTML (fetched separately by the
-        detector module). This method is called after scraping to attach
-        technology fingerprints.
-        """
-        results: List[DiscoveryResult] = []
-        for domain in domains:
-            html = html_map.get(domain, "")
-            # Placeholder for detector.detect_technologies(html, {})
-            detected_tech: List[str] = []
-            if "shopify" in html.lower():
-                detected_tech.append("Shopify")
-            if "stripe" in html.lower():
-                detected_tech.append("Stripe")
-
-            result = DiscoveryResult(
-                domain=domain,
-                tech=detected_tech,
-                url=f"https://{domain}",
-            )
-            results.append(result)
-        return results
+        url = f"{base_url}?{q_param}={httpx.quote(query)}"
+        try:
+            resp = await self.client.get(url)
+            resp.raise_for_status()
+            domains = parse_results(engine_name, resp.text)
+            await asyncio.sleep(delay)
+            return domains
+        except httpx.HTTPError:
+            await asyncio.sleep(delay)
+            return []
+        except Exception:
+            await asyncio.sleep(delay)
+            return []
 
     async def close(self) -> None:
-        """Close the underlying AsyncClient."""
+        """Close the underlying async HTTP client."""
         await self.client.aclose()
 
 
-# Synchronous helper for example scripts and tests (no network)
-def parse_results(html: str, engine: str = "google") -> List[str]:
-    """Synchronous wrapper around the parser for tests and offline examples."""
-    client = SearchClient()
-    try:
-        return client.parse_results(html, engine)
-    finally:
-        # No async close needed for pure parsing path
-        pass
-
-
-__all__ = [
-    "SearchClient",
-    "parse_results",
-]
+__all__ = ["SearchClient", "parse_results"]

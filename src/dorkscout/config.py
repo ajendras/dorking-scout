@@ -263,8 +263,8 @@ def validate_dork_database(db: Optional[Dict[str, Any]] = None) -> None:
             )
 
     # Validate every dork pattern (structure, Pydantic model, engine).
-    # Done before tech-mapping coverage so engine errors surface first
-    # (satisfies test_validation_fails_on_bad_engine even for unmapped tech).
+    # Engine check moved before Pydantic so "Invalid engine" errors surface
+    # first (satisfies test_validation_fails_on_bad_engine even for unmapped tech).
     valid_engines = {"google", "bing", "duckduckgo", "baidu", "yandex"}
     for tech, pattern_list in dorks_dict.items():
         if not isinstance(pattern_list, list) or len(pattern_list) == 0:
@@ -272,18 +272,18 @@ def validate_dork_database(db: Optional[Dict[str, Any]] = None) -> None:
         for i, raw_pattern in enumerate(pattern_list):
             if not isinstance(raw_pattern, dict) or "signature" not in raw_pattern:
                 raise ValueError(f"Pattern {i} for '{tech}' must be dict with 'signature'")
+            eng = raw_pattern.get("engine", "google")
+            if eng not in valid_engines:
+                raise ValueError(
+                    f"Invalid engine '{eng}' for '{tech}' pattern {i}. "
+                    f"Valid: {sorted(valid_engines)}"
+                )
             try:
                 DorkPattern.model_validate(raw_pattern)
             except ValidationError as exc:
                 raise ValueError(
                     f"Invalid dork pattern for '{tech}' at index {i}: {exc}"
                 ) from exc
-            eng = raw_pattern.get("engine", "google")
-            if eng not in valid_engines:
-                raise ValueError(
-                    f"Invalid engine '{eng}' for '{tech}' pattern {i}. "
-                    f"Valid: {valid_engines}"
-                )
 
     # Validate all dork techs have a mapping entry
     for tech in dorks_dict:
