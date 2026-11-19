@@ -3,7 +3,7 @@
 Lightweight fingerprinting inspired by Wappalyzer. Uses regex signatures
 against HTML content and HTTP headers to identify payment gateways, ecommerce
 platforms and other technologies. Designed for speed and zero external API
-dependencies. Signatures are curated to match the dorks database and avoid
+dependencies. Signatures are curated to match the dork database and avoid
 false positives on common noise domains.
 """
 
@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 # once for performance. Header checks are included for server-side signals.
 TECH_SIGNATURES: Dict[str, List[Dict[str, str]]] = {
     "Shopify": [
+        {"html": r"powered by shopify"},
         {"html": r"cdn\.shopify\.com"},
         {"html": r"Shopify\.Checkout"},
         {"html": r'"shopify":'},
@@ -62,6 +63,7 @@ TECH_SIGNATURES: Dict[str, List[Dict[str, str]]] = {
         {"html": r"bcapp"},
     ],
 }
+
 
 def detect_technologies(
     html: str = "", headers: Optional[Dict[str, Any]] = None
