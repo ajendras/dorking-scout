@@ -3,7 +3,8 @@
 Loads (or falls back to embedded) JSON-based dork patterns grouped by
 payment gateways, platforms and product niches. Provides SEARCH_ENGINES
 configuration for the multi-engine async search clients. Full scraping
-support for Baidu and Yandex is now included.
+support for Baidu and Yandex is now included. Also defines DB_PATH
+and get_db_path() for the persistent SQLite store.
 """
 
 import copy
@@ -17,6 +18,7 @@ from .models import Category, DorkPattern
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
 DORKS_JSON_PATH = ROOT_DIR / "dorks.json"
+DB_PATH = ROOT_DIR / "dorkscout.db"
 
 # Embedded production-ready defaults. These are realistic, tested dorks
 # that avoid common noise (marketplaces, corporate sites) and work with
@@ -301,6 +303,14 @@ def get_dork_db() -> Dict[str, Any]:
 def get_search_engines() -> List[Dict[str, str]]:
     """Return configured search engines with rate-limit hints."""
     return SEARCH_ENGINES
+
+
+def get_db_path() -> Path:
+    """Return the path to the SQLite database file.
+
+    The file is created automatically by DiscoveryStore on first use.
+    """
+    return DB_PATH
 
 
 DORK_DB: Dict[str, Any] = _deep_merge(DEFAULT_DORK_DB, _load_json_override())

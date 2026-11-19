@@ -3,8 +3,12 @@
 Endpoints:
 - GET /api/categories — returns curated category metadata
 - POST /api/search — runs multi-engine dork searches, deduplicates domains,
-  performs lightweight tech detection and returns DiscoveryResult objects
+  performs lightweight tech detection, persists to DiscoveryStore and
+  returns DiscoveryResult objects
 - GET /api/export — generates CSV or JSON downloads with metadata
+- GET /api/history — returns recent searches and total unique domains
+  from the persistent SQLite store
+- GET /api/domains — lists persisted unique domains (optionally filtered)
 
 All endpoints validate input, handle errors gracefully and respect rate limits.
 Search is intentionally limited in scope to keep responses under 4 seconds.
@@ -12,6 +16,7 @@ Search is intentionally limited in scope to keep responses under 4 seconds.
 
 import csv
 import httpx
+import json
 from datetime import datetime, timezone
 from io import StringIO
 from typing import Any, Dict, List, Optional
@@ -24,6 +29,7 @@ from .detector import detect_technologies
 from .dorks import build_query, get_dorks, list_all_techs, load_dorks
 from .models import Category, DiscoveryResult
 from .search import SearchClient
+from .store import DiscoveryStore
 
 router = APIRouter(tags=["api"], prefix="/api")
 
@@ -48,7 +54,8 @@ async def perform_search(
 
     Accepts either a broad category or a specific tech (not both). Uses
     the SearchClient with rate-limit aware calls. Performs HTML-based
-    detection on the first handful of results only.
+    detection on the first handful of results only. Results are persisted
+    to the DiscoveryStore before returning.
 
     Body example:
     {
@@ -137,6 +144,21 @@ async def perform_search(
                 detected_at=datetime.now(timezone.utc).isoformat(),
             )
             results.append(result)
+
+        # Persist to SQLite store (non-fatal if it fails)
+        try:
+            store: DiscoveryStore = request.app.state.store
+            primary_query = queries_used[0] if queries_used else ""
+            store.record_search(
+                query=primary_query,
+                results=results,
+                category=category,
+                tech=tech,
+                term=term,
+                engine="multi",
+            )
+        except Exception as store_exc:  # pylint: disable=broad-except
+            print(f"Warning: could not persist search to store: {store_exc}")
 
         return {
             "results": [r.model_dump(mode="json") for r in results],
@@ -254,6 +276,44 @@ async def export_results(
         ) from exc
     finally:
         await client.close()
+
+
+@router.get("/history")
+def get_history(
+    request: Request, limit: int = Query(20, ge=1, le=100)
+) -> Dict[str, Any]:
+    """Return recent search history from the persistent SQLite store.
+
+    Includes query metadata, result counts and a total count of unique
+    domains discovered so far.
+    """
+    store: Optional[DiscoveryStore] = getattr(request.app.state, "store", None)
+    if not store:
+        raise HTTPException(status_code=500, detail="Store not initialized")
+
+    history = store.get_search_history(limit)
+    total_domains = store.get_total_unique_domains()
+
+    return {
+        "history": history,
+        "total_searches": len(history),
+        "total_unique_domains": total_domains,
+    }
+
+
+@router.get("/domains")
+def list_domains(
+    request: Request,
+    limit: int = Query(50, ge=1, le=500),
+    tech: Optional[str] = Query(None, description="Filter by technology"),
+) -> Dict[str, Any]:
+    """Return persisted unique domains, optionally filtered by tech."""
+    store: Optional[DiscoveryStore] = getattr(request.app.state, "store", None)
+    if not store:
+        raise HTTPException(status_code=500, detail="Store not initialized")
+
+    domains = store.get_unique_domains(limit=limit, tech=tech)
+    return {"domains": domains, "count": len(domains)}
 
 
 @router.get("/techs")

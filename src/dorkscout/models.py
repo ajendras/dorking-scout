@@ -4,7 +4,7 @@ Defines strongly-typed models for categories, dork patterns and discovered
 websites. All models include input validation with clear error messages.
 """
 
-from typing import List
+from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -100,4 +100,29 @@ class DiscoveryResult(BaseModel):
     )
 
 
-__all__ = ["Category", "DorkPattern", "DiscoveryResult"]
+class SearchHistory(BaseModel):
+    """Metadata for a single search execution persisted in SQLite."""
+
+    id: Optional[int] = None
+    query: str = Field(..., min_length=5)
+    category: Optional[str] = None
+    tech: Optional[str] = None
+    term: str = ""
+    timestamp: str
+    results_count: int = Field(0, ge=0)
+    engine: str = "multi"
+
+
+class StoredDomain(BaseModel):
+    """A domain persisted across multiple searches."""
+
+    domain: str
+    techs: List[str] = Field(default_factory=list)
+    first_seen: str
+    last_seen: str
+    seen_count: int = Field(1, ge=1)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+__all__ = ["Category", "DorkPattern", "DiscoveryResult", "SearchHistory", "StoredDomain"]

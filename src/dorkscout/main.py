@@ -1,6 +1,7 @@
 """Main entrypoint for the Dork Scout FastAPI application.
 
 Creates the app, configures static files, templates and registers the API and web routers.
+Also initialises the persistent DiscoveryStore on app.state.
 """
 
 from pathlib import Path
@@ -16,8 +17,8 @@ def create_app() -> FastAPI:
     """Factory that creates and configures the FastAPI application.
 
     Mounts static assets (for the warm organic UI), registers routers for the
-    category browser, live search and export features, and attaches shared
-    state (templates, dork database).
+    category browser, live search, export and history features, attaches
+    shared state (templates, dork database and the persistent DiscoveryStore).
 
     Returns:
         FastAPI: Fully configured application instance.
@@ -43,6 +44,9 @@ def create_app() -> FastAPI:
     templates = Jinja2Templates(directory=str(templates_dir))
     app.state.templates = templates
     app.state.dork_db = DORK_DB
+
+    from .store import DiscoveryStore
+    app.state.store = DiscoveryStore()
 
     # Register UI and API routers (defined in web.py and api.py)
     from .web import router as web_router

@@ -77,7 +77,25 @@ Background workers keep the HTMX UI responsive during scans
 <code>DiscoveryResult</code> objects combine domains, detected tech and timestamps
 </td>
 </tr>
+<tr>
+<td>
+💾 <b>Persistence</b><br>
+SQLite store records every search and accumulates unique domains with history
+</td>
+<td></td>
+<td></td>
+</tr>
 </table>
+
+## 🗄️ Persistent Storage
+
+Every search automatically saves to a local SQLite database (`dorkscout.db`). 
+
+- Unique domains accumulated over time with `first_seen`/`last_seen`, `seen_count` and detected tech
+- Full history of queries, categories, terms and result counts
+- New API endpoints `/api/history` and `/api/domains` for querying past activity
+
+This enables deduplication across sessions, future analytics and scheduled alerts.
 
 ## 📦 Installation
 
@@ -158,6 +176,14 @@ curl -X POST http://127.0.0.1:8000/api/search \
 
 Returns a JSON payload with `results`, `total`, `queries_used` and rich `DiscoveryResult` entries.
 
+### Querying search history
+
+```bash
+curl "http://127.0.0.1:8000/api/history?limit=10"
+```
+
+Returns recent searches, result counts and total unique domains persisted in the SQLite store. The `DiscoveryStore` is automatically initialised on app startup and persists across runs.
+
 <details><summary>Exporting results programmatically</summary>
 
 ```python
@@ -196,7 +222,8 @@ See `tests/test_dorks.py` for the validation test suite. New contributions must 
 <tr><td><code>validate_dork_database()</code></td><td>runs on import</td><td>Pydantic + custom checks for dorks, categories and mappings. Enables safe community extensions (see tests).</td></tr>
 <tr><td><code>TECH_TO_CATEGORY</code></td><td>Now part of DB (extensible)</td><td>Links tech names to categories; new techs require a mapping entry in <code>dorks.json</code></td></tr>
 <tr><td><code>timeout</code> (SearchClient)</td><td>12.0</td><td>httpx timeout passed to <code>AsyncClient</code></td></tr>
-<tr><td><code>build_query()</code></td><td>—</td><td>Now consistently quotes the supplied <code>term</code> as a phrase for improved precision on both single- and multi-word inputs (updated in v0.1.0 CI fixes).</td></tr>
+<tr><td><code>DB_PATH</code></td><td><code>./dorkscout.db</code></td><td>SQLite file for persistent domain and search history (auto-created and managed by <code>DiscoveryStore</code>)</td></tr>
+<tr><td><code>build_query()</code></td><td>—</td><td>Now consistently quotes the supplied <code>term</code> as a phrase for improved precision on both single-word and multi-word inputs (updated in v0.1.0 CI fixes).</td></tr>
 </table>
 
 ## 🧩 Architecture
@@ -204,17 +231,19 @@ See `tests/test_dorks.py` for the validation test suite. New contributions must 
 ```mermaid
 flowchart TD
     UI[Browser + HTMX] --> Web[web.py routes<br/>index, category_page]
-    Web --> API[api.py router<br/>/api/search, /api/export]
+    Web --> API[api.py router<br/>/api/search, /api/export, /api/history]
     API --> Dorks[dorks.py<br/>get_dorks() • build_query()]
-    Dorks --> Config[config.py<br/>DORK_DB + SEARCH_ENGINES]
+    Dorks --> Config[config.py<br/>DORK_DB + SEARCH_ENGINES + DB_PATH]
     API --> Search[search.py<br/>SearchClient.search_with_rate_limit() (Google/Bing/DDG/Baidu/Yandex)]
     Search --> Parser[parse_results() +<br/>BeautifulSoup]
     Parser --> Detector[detector.py<br/>detect_technologies() using TECH_SIGNATURES]
-    Detector --> Models[models.py<br/>DiscoveryResult]
+    Detector --> Models[models.py<br/>DiscoveryResult + SearchHistory + StoredDomain]
+    API --> Store[store.py<br/>DiscoveryStore + SQLite]
+    Store --> DB[(dorkscout.db)]
     API --> Export[CSV/JSON StreamingResponse]
 ```
 
-The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the curated database, `search.py` handles async multi-engine queries with noise filtering, `detector.py` adds technology fingerprints, and FastAPI routers (`api.py`, `web.py`) serve both the organic UI and JSON endpoints. All heavy lifting runs in background workers so the HTMX interface stays responsive.
+The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the curated database, `search.py` handles async multi-engine queries with noise filtering, `detector.py` adds technology fingerprints, `store.py` provides persistent history, and FastAPI routers (`api.py`, `web.py`) serve both the organic UI and JSON endpoints. All heavy lifting runs in background workers so the HTMX interface stays responsive.
 
 ## 📁 Project structure
 
@@ -224,19 +253,20 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 ├── dorks.json                     # Optional override (merged with DEFAULT_DORK_DB)
 ├── src/dorkscout/
 │   ├── main.py                    # create_app() FastAPI factory + run() uvicorn entrypoint
-│   ├── config.py                  # DEFAULT_DORK_DB, SEARCH_ENGINES, load functions
-│   ├── models.py                  # Category, DorkPattern, DiscoveryResult Pydantic models
+│   ├── config.py                  # DEFAULT_DORK_DB, SEARCH_ENGINES, DB_PATH, load functions
+│   ├── models.py                  # Category, DorkPattern, DiscoveryResult, SearchHistory, StoredDomain
 │   ├── dorks.py                   # load_dorks, get_dorks, build_query, list_all_techs
 │   ├── search.py                  # SearchClient (async Google/Bing/DDG/Baidu/Yandex) + parse_results
 │   ├── detector.py                # detect_technologies + TECH_SIGNATURES regex rules
-│   ├── api.py                     # /api/categories, /api/search (POST), /api/export
+│   ├── store.py                   # Persistent SQLite layer (DiscoveryStore)
+│   ├── api.py                     # /api/categories, /api/search (POST), /api/export, /api/history
 │   └── web.py                     # UI routes serving Jinja2 templates with HTMX
 ├── examples/
 │   ├── discover_payments.py       # Stripe + gift-card example with CSV export
 │   └── niche_books.py             # Product-niche demo exporting unique domains
 ├── tests/
 │   ├── test_dorks.py              # Tests for loading, filtering, query building
-│   └── test_search.py             # Mocked HTML parsing and deduplication tests
+│   └── test_search.py             # Mocked HTML parsing, deduplication and store tests
 └── templates/index.html           # Earthy UI with blob cards, Tailwind + HTMX
 ```
 
@@ -246,14 +276,14 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 pytest
 ```
 
-The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching, error cases and Pydantic validation. All CI tests now pass.
+The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching, error cases, Pydantic validation and the new `DiscoveryStore` (in-memory mode, record_search, history and unique domains). All CI tests now pass.
 
 ## 📍 Roadmap
 <!-- roadmap:start -->
 - [x] **v0.1.0** — first release: Curated Dorks, Multi-Engine, Niche Explorer, API-less Scan
 - [x] Add support for Baidu and Yandex result scraping
 - [x] Allow community PRs to extend dork database with validation tests
-- [ ] Persistent SQLite store for discovered domains with search history
+- [x] Persistent SQLite store for discovered domains with search history
 - [ ] Add domain age and SSL cert metadata enrichment using free sources
 - [ ] Implement local LLM helper to generate new dorks for unknown tech
 - [ ] Create companion browser extension that suggests dorks from Wappalyzer detections
