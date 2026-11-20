@@ -5,6 +5,9 @@ payment gateways, platforms and product niches. Provides SEARCH_ENGINES
 configuration for the multi-engine async search clients. Full scraping
 support for Baidu and Yandex is now included. Also defines DB_PATH
 and get_db_path() for the persistent SQLite store.
+
+Local LLM (Ollama) configuration for the dork generation helper is also
+defined here.
 """
 
 import copy
@@ -159,6 +162,17 @@ SEARCH_ENGINES: List[Dict[str, str]] = [
     },
 ]
 
+# Local LLM (Ollama) settings for generating dorks on unknown technologies.
+# Requires `ollama serve` running locally and a model pulled
+# (e.g. ollama pull llama3.2). The helper falls back gracefully if Ollama
+# is not available.
+OLLAMA_CONFIG: Dict[str, Any] = {
+    "url": "http://localhost:11434/api/generate",
+    "model": "llama3.2",
+    "temperature": 0.7,
+    "timeout": 45.0,
+}
+
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """Return a new dict with override deeply merged into base.
@@ -303,6 +317,16 @@ def get_dork_db() -> Dict[str, Any]:
 def get_search_engines() -> List[Dict[str, str]]:
     """Return configured search engines with rate-limit hints."""
     return SEARCH_ENGINES
+
+
+def get_llm_config() -> Dict[str, Any]:
+    """Return configuration for the local LLM (Ollama) dork generator.
+
+    The helper in dorks.py uses these settings. Users can change the
+    defaults directly in this file or extend the function in the future
+    to read from environment variables.
+    """
+    return OLLAMA_CONFIG.copy()
 
 
 def get_db_path() -> Path:

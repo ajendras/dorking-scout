@@ -87,7 +87,10 @@ SQLite store records every search and accumulates unique domains with history
 🌐 <b>Metadata Enrichment</b><br>
 Domain age from Wayback Machine CDX API and SSL cert details from crt.sh (free, no keys)
 </td>
-<td></td>
+<td>
+🤖 <b>LLM Dork Gen</b><br>
+Local LLM (Ollama) helper generates high-quality dorks for unknown or new tech
+</td>
 </tr>
 </table>
 
@@ -185,6 +188,34 @@ python examples/niche_books.py
 
 Demonstrates the “niches” category with product-specific terms, deduplication against the `noise_domains` set, enrichment via free sources, and export of up to 20 unique domains.
 
+### Generating dorks for unknown tech (new)
+
+Requires [Ollama](https://ollama.com) installed and running locally (`ollama serve`) with a model pulled (recommended: `ollama pull llama3.2`).
+
+```python
+import asyncio
+from dorkscout.dorks import generate_dorks_for_tech
+from dorkscout.models import DorkPattern
+
+async def main():
+    # Generate fresh dorks for a technology not in the built-in database
+    patterns: list[DorkPattern] = await generate_dorks_for_tech(
+        tech_name="NewCMS",
+        category="platforms",
+        num_dorks=4
+    )
+    for p in patterns:
+        print(p)
+        # Example output: G:"inurl:newcms admin" OR "powered by newcms" ...
+
+    # The patterns can be copied into dorks.json under a "NewCMS" key
+    # and a tech_to_category entry to make them permanent.
+
+asyncio.run(main())
+```
+
+The helper calls the local Ollama instance with a carefully crafted prompt, parses the JSON response, validates each pattern with Pydantic and falls back to a generic keyword dork if the LLM is unavailable.
+
 ### API-driven search
 
 ```bash
@@ -194,6 +225,16 @@ curl -X POST http://127.0.0.1:8000/api/search \
 ```
 
 Returns a JSON payload with `results`, `total`, `queries_used` and rich `DiscoveryResult` entries (including the new enrichment fields).
+
+### Generating dorks via API (new)
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/generate_dorks \
+  -H "Content-Type: application/json" \
+  -d '{"tech":"AcmePayments","category":"payment_gateways","num_dorks":3}'
+```
+
+Returns suggested `DorkPattern` objects that can be added to `dorks.json`.
 
 ### Querying search history
 
@@ -222,7 +263,7 @@ The endpoint uses the same `get_dorks()` + `SearchClient` flow but limits detect
 
 Community PRs can extend the dork database by placing a `dorks.json` in the project root (or editing `DEFAULT_DORK_DB` in `config.py`). The loader now performs a **deep merge** (new techs/patterns are added; duplicate signatures are skipped) and the database is automatically validated on import by `validate_dork_database()`.
 
-Validation enforces:
+The new `generate_dorks_for_tech()` helper can be used to bootstrap high-quality patterns for technologies that are not yet covered. Validation enforces:
 - Pydantic models for every `Category` and `DorkPattern`
 - Valid engines (google|bing|duckduckgo|baidu|yandex)
 - Consistent `tech_to_category` mapping
@@ -238,6 +279,8 @@ See `tests/test_dorks.py` for the validation test suite. New contributions must 
 <tr><th>Option</th><th>Default</th><th>Description</th></tr>
 <tr><td><code>DORKS_JSON_PATH</code></td><td><code>./dorks.json</code></td><td>Optional file that extends or overrides <code>DEFAULT_DORK_DB</code> (loaded by <code>config.py</code> with deep merge)</td></tr>
 <tr><td><code>SEARCH_ENGINES</code></td><td>Google, Bing, DuckDuckGo, Baidu, Yandex</td><td>List of dicts with <code>base</code>, <code>query_param</code> and <code>rate_limit</code> used by <code>SearchClient</code> (full scraping support for all engines)</td></tr>
+<tr><td><code>OLLAMA_URL</code></td><td><code>http://localhost:11434/api/generate</code></td><td>Local Ollama endpoint used by the LLM dork generator (configurable in <code>config.py</code>)</td></tr>
+<tr><td><code>DEFAULT_LLM_MODEL</code></td><td><code>llama3.2</code></td><td>Model used by <code>generate_dorks_for_tech()</code>. Must be pulled locally with Ollama.</td></tr>
 <tr><td><code>validate_dork_database()</code></td><td>runs on import</td><td>Pydantic + custom checks for dorks, categories and mappings. Enables safe community extensions (see tests).</td></tr>
 <tr><td><code>TECH_TO_CATEGORY</code></td><td>Now part of DB (extensible)</td><td>Links tech names to categories; new techs require a mapping entry in <code>dorks.json</code></td></tr>
 <tr><td><code>timeout</code> (SearchClient)</td><td>12.0</td><td>httpx timeout passed to <code>AsyncClient</code></td></tr>
@@ -251,9 +294,9 @@ See `tests/test_dorks.py` for the validation test suite. New contributions must 
 ```mermaid
 flowchart TD
     UI[Browser + HTMX] --> Web[web.py routes<br/>index, category_page]
-    Web --> API[api.py router<br/>/api/search, /api/export, /api/history]
-    API --> Dorks[dorks.py<br/>get_dorks() • build_query()]
-    Dorks --> Config[config.py<br/>DORK_DB + SEARCH_ENGINES + DB_PATH]
+    Web --> API[api.py router<br/>/api/search, /api/export, /api/history, /api/generate_dorks]
+    API --> Dorks[dorks.py<br/>get_dorks() • build_query() • generate_dorks_for_tech()]
+    Dorks --> Config[config.py<br/>DORK_DB + SEARCH_ENGINES + OLLAMA_CONFIG + DB_PATH]
     API --> Search[search.py<br/>SearchClient.search_with_rate_limit() (Google/Bing/DDG/Baidu/Yandex)]
     Search --> Parser[parse_results() +<br/>BeautifulSoup]
     Parser --> Detector[detector.py<br/>detect_technologies() + enrich_discovery_results()<br/>using free APIs (Wayback + crt.sh)]
@@ -261,9 +304,10 @@ flowchart TD
     API --> Store[store.py<br/>DiscoveryStore + SQLite]
     Store --> DB[(dorkscout.db)]
     API --> Export[CSV/JSON StreamingResponse]
+    LLM[Local Ollama] --> Dorks
 ```
 
-The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the curated database, `search.py` handles async multi-engine queries with noise filtering, `detector.py` adds technology fingerprints plus domain/SSL enrichment from free sources, `store.py` provides persistent history, and FastAPI routers (`api.py`, `web.py`) serve both the organic UI and JSON endpoints. All heavy lifting runs in background workers so the HTMX interface stays responsive.
+The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the curated database, `search.py` handles async multi-engine queries with noise filtering, `detector.py` adds technology fingerprints plus domain/SSL enrichment from free sources, `store.py` provides persistent history, and FastAPI routers (`api.py`, `web.py`) serve both the organic UI and JSON endpoints. All heavy lifting runs in background workers so the HTMX interface stays responsive. The new local-LLM helper lives in `dorks.py` and talks directly to Ollama's REST API.
 
 ## 📁 Project structure
 
@@ -275,17 +319,17 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 │   ├── main.py                    # create_app() FastAPI factory + run() uvicorn entrypoint
 │   ├── config.py                  # DEFAULT_DORK_DB, SEARCH_ENGINES, DB_PATH, load functions
 │   ├── models.py                  # Category, DorkPattern, DiscoveryResult, SearchHistory, StoredDomain
-│   ├── dorks.py                   # load_dorks, get_dorks, build_query, list_all_techs
+│   ├── dorks.py                   # load_dorks, get_dorks, build_query, list_all_techs + generate_dorks_for_tech
 │   ├── search.py                  # SearchClient (async Google/Bing/DDG/Baidu/Yandex) + parse_results
 │   ├── detector.py                # detect_technologies + TECH_SIGNATURES + async enrichment
 │   ├── store.py                   # Persistent SQLite layer (DiscoveryStore)
-│   ├── api.py                     # /api/categories, /api/search (POST), /api/export, /api/history
+│   ├── api.py                     # /api/categories, /api/search (POST), /api/export, /api/history, /api/generate_dorks
 │   └── web.py                     # UI routes serving Jinja2 templates with HTMX
 ├── examples/
 │   ├── discover_payments.py       # Stripe + gift-card example with CSV export
 │   └── niche_books.py             # Product-niche demo exporting unique domains
 ├── tests/
-│   ├── test_dorks.py              # Tests for loading, filtering, query building
+│   ├── test_dorks.py              # Tests for loading, filtering, query building, validation and LLM helper
 │   └── test_search.py             # Mocked HTML parsing, deduplication, enrichment and store tests
 └── templates/index.html           # Earthy UI with blob cards, Tailwind + HTMX
 ```
@@ -296,7 +340,7 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 pytest
 ```
 
-The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching, the new `enrich_metadata()` / `enrich_discovery_results()` (with mocked HTTP responses), error cases, Pydantic validation and the new `DiscoveryStore` (in-memory mode, record_search, history and unique domains). All CI tests now pass.
+The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching, the new `enrich_metadata()` / `enrich_discovery_results()` (with mocked HTTP responses), error cases, Pydantic validation and the new `DiscoveryStore` (in-memory mode, record_search, history and unique domains). New tests for `generate_dorks_for_tech()` (with mocked Ollama responses and fallback path) have been added. All CI tests now pass.
 
 ## 📍 Roadmap
 <!-- roadmap:start -->
@@ -305,7 +349,7 @@ The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks(
 - [x] Allow community PRs to extend dork database with validation tests
 - [x] Persistent SQLite store for discovered domains with search history
 - [x] Add domain age and SSL cert metadata enrichment using free sources
-- [ ] Implement local LLM helper to generate new dorks for unknown tech
+- [x] Implement local LLM helper to generate new dorks for unknown tech
 - [ ] Create companion browser extension that suggests dorks from Wappalyzer detections
 - [ ] Add scheduled background jobs with email or webhook alerts for fresh domains
 - [ ] Build analytics dashboard showing tech distribution graphs across results

@@ -3,11 +3,19 @@
 Provides a clean interface over the JSON/embedded dork database. Supports
 filtering by broad category or specific technology. All functions perform
 input validation and return properly typed Pydantic models.
+
+Also implements an async local-LLM helper (via Ollama) that can generate
+fresh, high-quality dork patterns for technologies that are not yet in the
+database.
 """
 
-from typing import Dict, List, Optional
+import json
+import re
+from typing import Any, Dict, List, Optional
 
-from .config import get_dork_db, validate_dork_database
+import httpx
+
+from .config import get_dork_db, get_llm_config, validate_dork_database
 from .models import DorkPattern
 
 
@@ -150,6 +158,146 @@ def list_all_techs() -> List[str]:
     return sorted(db.get("dorks", {}).keys())
 
 
+def _extract_json_from_llm_response(text: str) -> List[Dict[str, Any]]:
+    """Robustly extract a JSON array from an LLM response.
+
+    Handles cases where the model returns extra prose, markdown code fences
+    or malformed JSON.
+    """
+    text = text.strip()
+    if not text:
+        return []
+
+    # Strip markdown fences if present
+    if text.startswith("```"):
+        text = text.split("```", 2)[-2].strip()
+        if text.startswith("json"):
+            text = text[4:].strip()
+
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return parsed
+    except json.JSONDecodeError:
+        pass
+
+    # Try to locate the first JSON array in the text
+    match = re.search(r"(\[[\s\S]*\])", text, re.DOTALL)
+    if match:
+        try:
+            parsed = json.loads(match.group(1))
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    return []
+
+
+async def generate_dorks_for_tech(
+    tech_name: str,
+    category: Optional[str] = None,
+    num_dorks: int = 4,
+    model: Optional[str] = None,
+) -> List[DorkPattern]:
+    """Generate new dork patterns for an unknown technology using a local LLM (Ollama).
+
+    Requires Ollama running locally (`ollama serve`) with a capable model
+    pulled (recommended: `ollama pull llama3.2`). The prompt is engineered
+    to produce specific, low-noise signatures that work across multiple
+    search engines. Returned patterns are always validated through the
+    existing Pydantic model.
+
+    If the LLM call fails (connection error, JSON parse error, etc.) a
+    simple fallback dork based on the tech name is returned.
+
+    Args:
+        tech_name: Name of the technology (e.g. "AcmePayments", "NewShop").
+        category: Optional category hint ("payment_gateways", "platforms", "niches").
+        num_dorks: How many distinct patterns to request (capped at 8).
+        model: Override the default model from config.
+
+    Returns:
+        List of validated DorkPattern objects (1 or more).
+    """
+    if not tech_name or not isinstance(tech_name, str):
+        raise ValueError("tech_name must be a non-empty string")
+
+    config = get_llm_config()
+    llm_model = model or config["model"]
+    cat = category or "platforms"
+    n = min(max(int(num_dorks), 1), 8)
+
+    prompt = f"""You are an expert OSINT and Google dorking specialist.
+Generate exactly {n} high-signal search dorks that can be used to discover
+websites using the unknown technology named '{tech_name}'.
+
+Category hint: {cat}
+Focus on:
+- "powered by", script src, meta tags, URL patterns, footer text
+- Specific exclusions for marketplaces, github, corporate sites
+- Varied engines (google, bing, duckduckgo, baidu, yandex)
+
+Return **ONLY** a valid JSON array of objects. No extra text.
+Each object must contain "signature" and "engine".
+
+Example:
+[
+  {{"signature": "\\"powered by {tech_name.lower()}\\" OR inurl:{tech_name.lower()}/checkout -site:github.com", "engine": "google"}},
+  {{"signature": "intitle:{tech_name} dashboard -inurl:(login admin)", "engine": "bing"}}
+]
+"""
+
+    try:
+        async with httpx.AsyncClient(timeout=config["timeout"]) as client:
+            resp = await client.post(
+                config["url"],
+                json={
+                    "model": llm_model,
+                    "prompt": prompt,
+                    "stream": False,
+                    "format": "json",
+                    "options": {"temperature": config["temperature"]},
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            response_text = data.get("response", "")
+
+            raw_list = _extract_json_from_llm_response(response_text)
+            if not isinstance(raw_list, list):
+                raw_list = []
+
+            patterns: List[DorkPattern] = []
+            valid_engines = {"google", "bing", "duckduckgo", "baidu", "yandex"}
+
+            for item in raw_list[:n]:
+                if not isinstance(item, dict) or "signature" not in item:
+                    continue
+                if "engine" not in item or item["engine"] not in valid_engines:
+                    item["engine"] = "google"
+                # Ensure some noise reduction is present
+                sig = item["signature"]
+                if not any(ex in sig.lower() for ex in ("-site:", "-inurl:", "-intitle:")):
+                    sig += " -site:github.com -site:gitlab.com"
+                    item["signature"] = sig
+                patterns.append(DorkPattern.model_validate(item))
+
+            if patterns:
+                return patterns
+
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"Local LLM dork generation for '{tech_name}' failed: {exc}")
+        print(
+            "Make sure Ollama is running (`ollama serve`) "
+            "and the model is pulled (`ollama pull llama3.2`)."
+        )
+
+    # Graceful fallback when LLM is unavailable
+    fallback = f'"powered by {tech_name}" OR "{tech_name.lower()}" (checkout OR store OR dashboard) -site:github.com'
+    return [DorkPattern(signature=fallback, engine="google")]
+
+
 __all__ = [
     "load_dorks",
     "get_dorks",
@@ -157,4 +305,5 @@ __all__ = [
     "get_category_info",
     "list_all_techs",
     "get_tech_to_category",
+    "generate_dorks_for_tech",
 ]

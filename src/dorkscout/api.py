@@ -9,6 +9,8 @@ Endpoints:
 - GET /api/history — returns recent searches and total unique domains
   from the persistent SQLite store
 - GET /api/domains — lists persisted unique domains (optionally filtered)
+- POST /api/generate_dorks — uses the local LLM helper to suggest new
+  dork patterns for unknown technologies (requires Ollama locally)
 
 All endpoints validate input, handle errors gracefully and respect rate limits.
 Search is intentionally limited in scope to keep responses under 4 seconds.
@@ -26,7 +28,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import get_search_engines
 from .detector import detect_technologies, enrich_discovery_results
-from .dorks import build_query, get_dorks, list_all_techs, load_dorks
+from .dorks import build_query, generate_dorks_for_tech, get_dorks, list_all_techs, load_dorks
 from .models import Category, DiscoveryResult
 from .search import SearchClient
 from .store import DiscoveryStore
@@ -341,6 +343,47 @@ def list_technologies():
     Useful for autocomplete dropdowns in the niche explorer.
     """
     return {"techs": list_all_techs()}
+
+
+@router.post("/generate_dorks")
+async def generate_dorks(
+    payload: Dict[str, Any] = Body(...)
+) -> Dict[str, Any]:
+    """Generate fresh dork patterns for an unknown technology using the
+    local LLM helper (Ollama).
+
+    The returned patterns are validated Pydantic models and can be copied
+    directly into a dorks.json file. Requires Ollama to be running locally.
+    """
+    tech: str = (payload.get("tech") or "").strip()
+    if not tech:
+        raise HTTPException(
+            status_code=400, detail="tech name is required"
+        )
+
+    category: Optional[str] = payload.get("category")
+    num_dorks: int = int(payload.get("num_dorks", 4))
+
+    try:
+        patterns = await generate_dorks_for_tech(
+            tech_name=tech,
+            category=category,
+            num_dorks=num_dorks,
+        )
+        return {
+            "tech": tech,
+            "category": category,
+            "dorks": [p.model_dump(mode="json") for p in patterns],
+            "count": len(patterns),
+            "message": (
+                "Copy these patterns into dorks.json under the tech key "
+                "and add a tech_to_category mapping."
+            ),
+        }
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500, detail=f"LLM generation failed: {str(exc)}"
+        ) from exc
 
 
 __all__ = ["router"]
