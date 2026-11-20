@@ -25,7 +25,7 @@ from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import get_search_engines
-from .detector import detect_technologies
+from .detector import detect_technologies, enrich_discovery_results
 from .dorks import build_query, get_dorks, list_all_techs, load_dorks
 from .models import Category, DiscoveryResult
 from .search import SearchClient
@@ -145,6 +145,10 @@ async def perform_search(
             )
             results.append(result)
 
+        # Enrich top results with domain age (Wayback CDX) and SSL cert metadata (crt.sh)
+        # This is best-effort and limited to keep the endpoint fast
+        await enrich_discovery_results(results)
+
         # Persist to SQLite store (non-fatal if it fails)
         try:
             store: DiscoveryStore = request.app.state.store
@@ -226,6 +230,9 @@ async def export_results(
             )
             results.append(result)
 
+        # Enrich a few results for richer export (free sources)
+        await enrich_discovery_results(results[:5])
+
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
 
         if fmt == "json":
@@ -246,7 +253,18 @@ async def export_results(
 
         # CSV export
         output = StringIO()
-        fieldnames = ["domain", "tech", "url", "detected_at", "title"]
+        fieldnames = [
+            "domain",
+            "tech",
+            "url",
+            "detected_at",
+            "title",
+            "domain_age_days",
+            "creation_date",
+            "ssl_issuer",
+            "ssl_valid_from",
+            "ssl_valid_to",
+        ]
         writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
 

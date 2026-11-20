@@ -5,10 +5,20 @@ against HTML content and HTTP headers to identify payment gateways, ecommerce
 platforms and other technologies. Designed for speed and zero external API
 dependencies. Signatures are curated to match the dork database and avoid
 false positives on common noise domains.
+
+Now also includes async enrichment of domain age (via Wayback Machine CDX API)
+and SSL certificate metadata (via crt.sh Certificate Transparency endpoint).
+These are free, public sources with no API keys required.
 """
 
 import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+import asyncio
+import httpx
+
+from .models import DiscoveryResult
 
 # Production-grade signatures. Each tech has multiple overlapping patterns.
 # Patterns are ordered from most specific to general. HTML is lowercased
@@ -145,4 +155,111 @@ def detect_from_response(
     return detect_technologies(html, headers)
 
 
-__all__ = ["detect_technologies", "detect_from_response", "TECH_SIGNATURES"]
+async def enrich_metadata(domain: str) -> Dict[str, Any]:
+    """Enrich a domain with age estimate and SSL certificate metadata using
+    free public sources. No API keys or accounts required.
+
+    Sources:
+      * Wayback Machine CDX API for first-capture timestamp (domain age)
+      * crt.sh JSON endpoint for Certificate Transparency data (issuer, validity)
+
+    Failures are silent; partial results are still useful.
+    """
+    enrichment: Dict[str, Any] = {
+        "domain_age_days": None,
+        "creation_date": None,
+        "ssl_issuer": None,
+        "ssl_valid_from": None,
+        "ssl_valid_to": None,
+    }
+
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(6.0),
+        headers={"User-Agent": "DorkScout-Enrich/0.2"},
+    ) as client:
+        # Domain age from Wayback Machine
+        try:
+            cdx_url = "https://web.archive.org/cdx/search/cdx"
+            params = {
+                "url": f"*.{domain}",
+                "matchType": "domain",
+                "limit": 1,
+                "output": "json",
+                "filter": "statuscode:200",
+                "from": "1996",
+            }
+            resp = await client.get(cdx_url, params=params)
+            if resp.is_success:
+                data = resp.json()
+                if isinstance(data, list) and len(data) > 1:
+                    ts_str = data[1][1]  # timestamp is second column
+                    if isinstance(ts_str, str) and len(ts_str) >= 8:
+                        dt = datetime.strptime(ts_str[:8], "%Y%m%d")
+                        enrichment["creation_date"] = dt.strftime("%Y-%m-%d")
+                        age = (datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc)).days
+                        enrichment["domain_age_days"] = max(age, 0)
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+        # SSL metadata from crt.sh
+        try:
+            ct_url = f"https://crt.sh/?q=%25.{domain}&output=json"
+            resp = await client.get(ct_url)
+            if resp.is_success:
+                certs = resp.json()
+                if isinstance(certs, list) and len(certs) > 0:
+                    from_dates = [c.get("not_before") for c in certs if isinstance(c, dict) and c.get("not_before")]
+                    to_dates = [c.get("not_after") for c in certs if isinstance(c, dict) and c.get("not_after")]
+                    issuer_list = []
+                    for c in certs:
+                        if isinstance(c, dict) and isinstance(c.get("issuer_name"), str):
+                            issuer = c["issuer_name"]
+                            # Clean up to just the CN part
+                            if "CN=" in issuer:
+                                issuer = issuer.split("CN=")[-1].split(",")[0].strip('" ')
+                            issuer_list.append(issuer)
+                    if from_dates:
+                        enrichment["ssl_valid_from"] = min(d for d in from_dates if d)
+                    if to_dates:
+                        enrichment["ssl_valid_to"] = max(d for d in to_dates if d)
+                    if issuer_list:
+                        # Use most common issuer
+                        counter: Dict[str, int] = {}
+                        for iss in issuer_list:
+                            counter[iss] = counter.get(iss, 0) + 1
+                        enrichment["ssl_issuer"] = max(counter, key=counter.get)  # type: ignore[arg-type]
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+    return enrichment
+
+
+async def enrich_discovery_results(results: List[DiscoveryResult]) -> None:
+    """Apply metadata enrichment to a list of DiscoveryResult objects (in-place).
+
+    Uses bounded concurrency. Only enriches the first 6 results to stay responsive
+    and respect public service load.
+    """
+    if not results:
+        return
+
+    sem = asyncio.Semaphore(3)
+
+    async def _do_enrich(result: DiscoveryResult):
+        async with sem:
+            meta = await enrich_metadata(result.domain)
+            for field, value in meta.items():
+                if value is not None:
+                    setattr(result, field, value)
+
+    tasks = [_do_enrich(r) for r in results[:6]]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+__all__ = [
+    "detect_technologies",
+    "detect_from_response",
+    "TECH_SIGNATURES",
+    "enrich_metadata",
+    "enrich_discovery_results",
+]

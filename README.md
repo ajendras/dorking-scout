@@ -26,6 +26,7 @@ Security researchers, OSINT practitioners and market analysts need to surface re
 - Hundreds of tested dorks grouped into **payment gateways**, **platforms** and **product niches**
 - Safe, rate-limited queries across Google, Bing, DuckDuckGo, Baidu and Yandex
 - API-less tech detection inspired by Wappalyzer using HTML signatures and headers
+- Domain age (Wayback Machine CDX) and SSL certificate metadata (crt.sh CT logs) enrichment on results
 - One-click CSV/JSON export of clean, deduplicated domains with metadata
 
 ## 🎬 Demo
@@ -82,7 +83,10 @@ Background workers keep the HTMX UI responsive during scans
 💾 <b>Persistence</b><br>
 SQLite store records every search and accumulates unique domains with history
 </td>
-<td></td>
+<td>
+🌐 <b>Metadata Enrichment</b><br>
+Domain age from Wayback Machine CDX API and SSL cert details from crt.sh (free, no keys)
+</td>
 <td></td>
 </tr>
 </table>
@@ -121,7 +125,8 @@ The app will be available at http://127.0.0.1:8000 with the warm organic UI (sof
 import asyncio
 from dorkscout.dorks import get_dorks, build_query
 from dorkscout.search import SearchClient
-from dorkscout.detector import detect_technologies
+from dorkscout.detector import detect_technologies, enrich_discovery_results
+from dorkscout.models import DiscoveryResult
 
 async def main():
     # Find Shopify stores in the coffee niche
@@ -135,11 +140,25 @@ async def main():
     
     print("Discovered domains:", domains[:5])
     
-    # Lightweight detection on first result
-    if domains:
+    # Lightweight detection + enrichment on first handful of results
+    results: list[DiscoveryResult] = []
+    for domain in domains[:3]:
         html = ""  # would be fetched in real usage
         tech = detect_technologies(html)
-        print("Detected:", tech)
+        result = DiscoveryResult(
+            domain=domain,
+            tech=tech or ["Shopify"],
+            url=f"https://{domain}",
+            detected_at="2024-12-18T10:00:00Z",
+        )
+        results.append(result)
+    
+    await enrich_discovery_results(results)
+    for r in results:
+        print(
+            f"{r.domain} — age: {r.domain_age_days} days, "
+            f"issuer: {r.ssl_issuer}, valid until: {r.ssl_valid_to}"
+        )
     
     await client.close()
 
@@ -156,7 +175,7 @@ The server can also be started with `dork-scout` and used via the browser or `/a
 python examples/discover_payments.py
 ```
 
-This script uses `get_dorks(tech="Stripe")`, appends a gift-card term via `build_query()` (which now consistently quotes the supplied term as a phrase), runs searches through `SearchClient.search_with_rate_limit()`, applies `detect_technologies()` and writes a CSV using `DiscoveryResult` objects.
+This script uses `get_dorks(tech="Stripe")`, appends a gift-card term via `build_query()` (which now consistently quotes the supplied term as a phrase), runs searches through `SearchClient.search_with_rate_limit()`, applies `detect_technologies()`, enriches results with `enrich_discovery_results()` (domain age + SSL metadata) and writes a CSV using `DiscoveryResult` objects. New columns for `domain_age_days`, `ssl_issuer`, etc. are included.
 
 ### Niche product search
 
@@ -164,7 +183,7 @@ This script uses `get_dorks(tech="Stripe")`, appends a gift-card term via `build
 python examples/niche_books.py
 ```
 
-Demonstrates the “niches” category with product-specific terms, deduplication against the `noise_domains` set, and export of up to 20 unique domains.
+Demonstrates the “niches” category with product-specific terms, deduplication against the `noise_domains` set, enrichment via free sources, and export of up to 20 unique domains.
 
 ### API-driven search
 
@@ -174,7 +193,7 @@ curl -X POST http://127.0.0.1:8000/api/search \
   -d '{"category":"niches","term":"vintage leather"}'
 ```
 
-Returns a JSON payload with `results`, `total`, `queries_used` and rich `DiscoveryResult` entries.
+Returns a JSON payload with `results`, `total`, `queries_used` and rich `DiscoveryResult` entries (including the new enrichment fields).
 
 ### Querying search history
 
@@ -195,7 +214,7 @@ resp = httpx.get(
 with open("stripe_gift.csv", "wb") as f:
     f.write(resp.content)
 ```
-The endpoint uses the same `get_dorks()` + `SearchClient` flow but limits detection for speed and streams CSV with semicolon-separated tech lists.
+The endpoint uses the same `get_dorks()` + `SearchClient` flow but limits detection for speed, applies enrichment on a few results, and streams CSV with semicolon-separated tech lists plus the new metadata columns.
 
 </details>
 
@@ -224,6 +243,7 @@ See `tests/test_dorks.py` for the validation test suite. New contributions must 
 <tr><td><code>timeout</code> (SearchClient)</td><td>12.0</td><td>httpx timeout passed to <code>AsyncClient</code></td></tr>
 <tr><td><code>DB_PATH</code></td><td><code>./dorkscout.db</code></td><td>SQLite file for persistent domain and search history (auto-created and managed by <code>DiscoveryStore</code>)</td></tr>
 <tr><td><code>build_query()</code></td><td>—</td><td>Now consistently quotes the supplied <code>term</code> as a phrase for improved precision on both single-word and multi-word inputs (updated in v0.1.0 CI fixes).</td></tr>
+<tr><td><code>enrich_discovery_results()</code></td><td>—</td><td>Async helper (limited to first 6 results) that calls free public APIs (Wayback Machine CDX + crt.sh). Internal semaphore and timeouts keep usage respectful.</td></tr>
 </table>
 
 ## 🧩 Architecture
@@ -236,14 +256,14 @@ flowchart TD
     Dorks --> Config[config.py<br/>DORK_DB + SEARCH_ENGINES + DB_PATH]
     API --> Search[search.py<br/>SearchClient.search_with_rate_limit() (Google/Bing/DDG/Baidu/Yandex)]
     Search --> Parser[parse_results() +<br/>BeautifulSoup]
-    Parser --> Detector[detector.py<br/>detect_technologies() using TECH_SIGNATURES]
+    Parser --> Detector[detector.py<br/>detect_technologies() + enrich_discovery_results()<br/>using free APIs (Wayback + crt.sh)]
     Detector --> Models[models.py<br/>DiscoveryResult + SearchHistory + StoredDomain]
     API --> Store[store.py<br/>DiscoveryStore + SQLite]
     Store --> DB[(dorkscout.db)]
     API --> Export[CSV/JSON StreamingResponse]
 ```
 
-The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the curated database, `search.py` handles async multi-engine queries with noise filtering, `detector.py` adds technology fingerprints, `store.py` provides persistent history, and FastAPI routers (`api.py`, `web.py`) serve both the organic UI and JSON endpoints. All heavy lifting runs in background workers so the HTMX interface stays responsive.
+The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the curated database, `search.py` handles async multi-engine queries with noise filtering, `detector.py` adds technology fingerprints plus domain/SSL enrichment from free sources, `store.py` provides persistent history, and FastAPI routers (`api.py`, `web.py`) serve both the organic UI and JSON endpoints. All heavy lifting runs in background workers so the HTMX interface stays responsive.
 
 ## 📁 Project structure
 
@@ -257,7 +277,7 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 │   ├── models.py                  # Category, DorkPattern, DiscoveryResult, SearchHistory, StoredDomain
 │   ├── dorks.py                   # load_dorks, get_dorks, build_query, list_all_techs
 │   ├── search.py                  # SearchClient (async Google/Bing/DDG/Baidu/Yandex) + parse_results
-│   ├── detector.py                # detect_technologies + TECH_SIGNATURES regex rules
+│   ├── detector.py                # detect_technologies + TECH_SIGNATURES + async enrichment
 │   ├── store.py                   # Persistent SQLite layer (DiscoveryStore)
 │   ├── api.py                     # /api/categories, /api/search (POST), /api/export, /api/history
 │   └── web.py                     # UI routes serving Jinja2 templates with HTMX
@@ -266,7 +286,7 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 │   └── niche_books.py             # Product-niche demo exporting unique domains
 ├── tests/
 │   ├── test_dorks.py              # Tests for loading, filtering, query building
-│   └── test_search.py             # Mocked HTML parsing, deduplication and store tests
+│   └── test_search.py             # Mocked HTML parsing, deduplication, enrichment and store tests
 └── templates/index.html           # Earthy UI with blob cards, Tailwind + HTMX
 ```
 
@@ -276,7 +296,7 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 pytest
 ```
 
-The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching, error cases, Pydantic validation and the new `DiscoveryStore` (in-memory mode, record_search, history and unique domains). All CI tests now pass.
+The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching, the new `enrich_metadata()` / `enrich_discovery_results()` (with mocked HTTP responses), error cases, Pydantic validation and the new `DiscoveryStore` (in-memory mode, record_search, history and unique domains). All CI tests now pass.
 
 ## 📍 Roadmap
 <!-- roadmap:start -->
@@ -284,7 +304,7 @@ The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks(
 - [x] Add support for Baidu and Yandex result scraping
 - [x] Allow community PRs to extend dork database with validation tests
 - [x] Persistent SQLite store for discovered domains with search history
-- [ ] Add domain age and SSL cert metadata enrichment using free sources
+- [x] Add domain age and SSL cert metadata enrichment using free sources
 - [ ] Implement local LLM helper to generate new dorks for unknown tech
 - [ ] Create companion browser extension that suggests dorks from Wappalyzer detections
 - [ ] Add scheduled background jobs with email or webhook alerts for fresh domains

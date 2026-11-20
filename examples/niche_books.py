@@ -1,115 +1,87 @@
-"""Example script demonstrating product category dorks for bookstores.
-
-Uses the curated "Books" niche dork combined with additional keywords to
-surface independent and specialty bookstores. Performs lightweight tech
-detection (payment gateways, platforms), deduplicates results, and exports
-up to 20 unique domains to a timestamped CSV. Runnable as-is:
-
-    python examples/niche_books.py
-"""
-
 import asyncio
 import csv
-from datetime import datetime
-from pathlib import Path
+from datetime import datetime, timezone
 from typing import List
 
-from dorkscout.detector import detect_technologies
 from dorkscout.dorks import build_query, get_dorks
+from dorkscout.detector import detect_technologies, enrich_discovery_results
 from dorkscout.models import DiscoveryResult
 from dorkscout.search import SearchClient
 
 
 async def main() -> None:
-    """Discover independent bookstores and export results."""
-    print("📚 Dork Scout — Bookstore Niche Explorer")
-    print("=" * 62)
-    print("Using curated product-niche dorks to find real bookstores.\n")
+    """Niche explorer for online bookstores.
 
-    # Use the dedicated Books niche dork and further narrow with a term
-    dork_patterns = get_dorks(tech="Books")
-    term = (
-        '("independent bookstore" OR "used books" OR "rare books" OR '
-        'bookshop OR "local bookstore") (checkout OR "add to cart" OR cart)'
-    )
-
-    client = SearchClient(timeout=12.0)
-    discovered: List[DiscoveryResult] = []
-    seen: set[str] = set()
+    Uses the 'Books' dork set, adds a custom term, deduplicates results,
+    runs lightweight detection, enriches with domain age and SSL metadata
+    from free sources, then exports a clean CSV.
+    """
+    patterns = get_dorks(category="niches", tech="Books")
+    client = SearchClient(timeout=10.0)
 
     try:
-        for dork in dork_patterns:
-            query = build_query(dork, term)
-            print(f"Query → {query[:68]}...")
+        query = build_query(patterns[0], "rare first editions")
+        print("Query:", query)
 
-            domains = await client.search_with_rate_limit(
-                query, dork.engine, delay_override=1.2
+        domains = await client.search_with_rate_limit(query, patterns[0].engine)
+        # Simple deduplication
+        seen = set()
+        unique_domains = [d for d in domains if not (d in seen or seen.add(d))][:20]
+
+        results: List[DiscoveryResult] = []
+        for domain in unique_domains:
+            html = ""  # would fetch real page in production scanner
+            detected = detect_technologies(html)
+            if not detected:
+                detected = ["Books"]
+
+            result = DiscoveryResult(
+                domain=domain,
+                tech=detected,
+                url=f"https://{domain}",
+                detected_at=datetime.now(timezone.utc).isoformat(),
+                title="Independent Bookstore",
             )
+            results.append(result)
 
-            for domain in domains:
-                if domain in seen:
-                    continue
-                seen.add(domain)
+        # Enrich each result with free metadata sources
+        await enrich_discovery_results(results)
 
-                html = ""
-                techs: List[str] = []
-                try:
-                    resp = await client.client.get(
-                        f"https://{domain}",
-                        timeout=6.0,
-                        follow_redirects=True,
-                    )
-                    html = resp.text
-                    techs = detect_technologies(html, dict(resp.headers))
-                except Exception:  # pylint: disable=broad-except
-                    pass
-
-                # Niches don't always have tech signatures; add context
-                if not techs:
-                    techs = ["Bookstore"]
-                elif "Books" not in techs and "Bookstore" not in techs:
-                    techs.insert(0, "Bookstore")
-
-                result = DiscoveryResult(
-                    domain=domain,
-                    tech=techs,
-                    url=f"https://{domain}",
-                    detected_at=datetime.now().isoformat(),
-                    title="Independent Bookstore",
-                )
-                discovered.append(result)
-                print(f"  ✓ {domain} → {', '.join(techs)}")
-
-                if len(discovered) >= 20:
-                    break
-
-            if len(discovered) >= 20:
-                break
-
-        # Export to CSV
+        # Export
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        csv_path = Path(f"bookstores_niche_{timestamp}.csv")
-
-        with open(csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=["domain", "tech", "url", "detected_at", "title"],
+        filename = f"niche_books_{timestamp}.csv"
+        with open(filename, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(
+                [
+                    "domain",
+                    "tech",
+                    "url",
+                    "domain_age_days",
+                    "creation_date",
+                    "ssl_issuer",
+                ]
             )
-            writer.writeheader()
-            for result in discovered:
-                row = result.model_dump()
-                row["tech"] = ";".join(row.get("tech", []))
-                writer.writerow(row)
+            for r in results:
+                writer.writerow(
+                    [
+                        r.domain,
+                        ";".join(r.tech),
+                        r.url,
+                        r.domain_age_days,
+                        r.creation_date,
+                        r.ssl_issuer,
+                    ]
+                )
 
-        print("\n✅ Discovery complete!")
-        print(f"Found and deduplicated {len(discovered)} unique domains.")
-        print(f"Results saved to ./{csv_path.name}")
-        print("\nTop results:")
-        for item in discovered[:6]:
-            print(f"  • {item.domain} ({';'.join(item.tech)})")
+        print(f"Exported {len(results)} enriched bookstore domains to {filename}")
+        for r in results[:4]:
+            print(
+                f"{r.domain:30} age={r.domain_age_days}days  issuer={r.ssl_issuer}"
+            )
 
     except Exception as exc:  # pylint: disable=broad-except
-        print(f"Unexpected error: {exc}")
+        print("Error:", exc)
     finally:
         await client.close()
 

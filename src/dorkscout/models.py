@@ -63,9 +63,9 @@ class DorkPattern(BaseModel):
 
 
 class DiscoveryResult(BaseModel):
-    """A deduplicated domain discovered via dorks with lightweight fingerprinting.
-
-    Used by the async runner, detector, export features and example scripts.
+    """A deduplicated domain discovered via dorks with lightweight fingerprinting
+    and optional enrichment from free public data sources (Wayback Machine for
+    age, crt.sh for SSL certificate transparency logs).
     """
 
     domain: str = Field(
@@ -81,6 +81,26 @@ class DiscoveryResult(BaseModel):
     title: str = Field(default="", description="Page title extracted during scan (if available)")
     url: str = Field(default="", description="Full URL where the domain was first observed")
     detected_at: str = Field(default="", description="ISO timestamp of discovery (optional)")
+    domain_age_days: Optional[int] = Field(
+        default=None,
+        description="Approximate domain age in days (from earliest Wayback snapshot)",
+    )
+    creation_date: Optional[str] = Field(
+        default=None,
+        description="Earliest known date from public archives (YYYY-MM-DD)",
+    )
+    ssl_issuer: Optional[str] = Field(
+        default=None,
+        description="Most common SSL certificate issuer from Certificate Transparency logs",
+    )
+    ssl_valid_from: Optional[str] = Field(
+        default=None,
+        description="Earliest SSL certificate 'notBefore' date",
+    )
+    ssl_valid_to: Optional[str] = Field(
+        default=None,
+        description="Latest SSL certificate 'notAfter' date",
+    )
 
     def add_tech(self, tech_name: str) -> None:
         """Add a technology if not already present (case-insensitive)."""
@@ -95,6 +115,12 @@ class DiscoveryResult(BaseModel):
                 "tech": ["Shopify", "Stripe"],
                 "title": "Example Books & Rare Editions",
                 "url": "https://examplebooks.com",
+                "detected_at": "2024-12-01T12:00:00Z",
+                "domain_age_days": 1856,
+                "creation_date": "2019-03-15",
+                "ssl_issuer": "Let's Encrypt",
+                "ssl_valid_from": "2024-01-15T00:00:00",
+                "ssl_valid_to": "2025-01-15T00:00:00",
             }
         }
     )
