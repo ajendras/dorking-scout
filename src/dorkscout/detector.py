@@ -192,12 +192,23 @@ async def enrich_metadata(domain: str) -> Dict[str, Any]:
             if resp.is_success:
                 data = resp.json()
                 if isinstance(data, list) and len(data) > 1:
-                    ts_str = data[1][1]  # timestamp is second column
-                    if isinstance(ts_str, str) and len(ts_str) >= 8:
-                        dt = datetime.strptime(ts_str[:8], "%Y%m%d")
-                        enrichment["creation_date"] = dt.strftime("%Y-%m-%d")
-                        age = (datetime.now(timezone.utc) - dt.replace(tzinfo=timezone.utc)).days
-                        enrichment["domain_age_days"] = max(age, 0)
+                    headers_row = data[0]
+                    row = data[1]
+                    if (
+                        isinstance(headers_row, list)
+                        and isinstance(row, list)
+                        and "timestamp" in headers_row
+                    ):
+                        ts_idx = headers_row.index("timestamp")
+                        ts_str = str(row[ts_idx])
+                        if isinstance(ts_str, str) and len(ts_str) >= 8:
+                            dt = datetime.strptime(ts_str[:8], "%Y%m%d")
+                            enrichment["creation_date"] = dt.strftime("%Y-%m-%d")
+                            age = (
+                                datetime.now(timezone.utc)
+                                - dt.replace(tzinfo=timezone.utc)
+                            ).days
+                            enrichment["domain_age_days"] = max(age, 0)
         except Exception:  # pylint: disable=broad-except
             pass
 
