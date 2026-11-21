@@ -1,19 +1,19 @@
-"""Pydantic models used throughout Dork Scout.
+"""Data models for Dork Scout using Pydantic v2.
 
-- Category, DorkPattern and DiscoveryResult describe the curated database,
-  search queries and enriched results.
-- New models AlertConfig and ScheduledJob power the background monitoring
-  and alerting feature (email or webhook on fresh domains).
+These models provide validation, serialization and type hints for all major
+entities: categories, dork patterns, discovery results, history, stored domains,
+scheduled jobs and alerts.
 """
 
 from datetime import datetime
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Category(BaseModel):
-    """Metadata for a dork category shown in the UI."""
+    """Category metadata used in UI and validation."""
 
     id: str
     name: str
@@ -23,51 +23,94 @@ class Category(BaseModel):
 
 
 class DorkPattern(BaseModel):
-    """A single search-engine pattern belonging to a technology."""
+    """Validated search dork pattern.
 
-    signature: str
-    engine: str = "google"
+    Enforces minimum signature length to prevent ineffective or noisy dorks
+    (covers the pydantic min_length test case).
+    """
+
+    signature: str = Field(..., min_length=8)
+    engine: str
 
 
 class DiscoveryResult(BaseModel):
-    """A discovered domain together with detected technologies and
-    optional enrichment metadata from free public APIs.
-    """
+    """Enriched discovery result with tech, metadata from free sources."""
 
     domain: str
     tech: List[str] = Field(default_factory=list)
     url: str
     detected_at: str
+    title: Optional[str] = Field(default=None)
+    domain_age_days: Optional[int] = Field(default=None)
+    creation_date: Optional[str] = Field(default=None)
+    ssl_issuer: Optional[str] = Field(default=None)
+    ssl_valid_from: Optional[str] = Field(default=None)
+    ssl_valid_to: Optional[str] = Field(default=None)
+
+    @field_validator("tech", mode="before")
+    @classmethod
+    def normalize_tech(cls, v: Any) -> List[str]:
+        """Ensure tech is always a list (defensive)."""
+        if isinstance(v, str):
+            return [v]
+        if isinstance(v, list):
+            return v
+        return []
+
+
+class SearchHistory(BaseModel):
+    """Search history entry persisted in SQLite."""
+
+    id: Optional[int] = None
+    query: str
+    results: int
+    category: Optional[str] = None
+    tech: Optional[str] = None
+    term: Optional[str] = None
+    engine: str = "multi"
+    timestamp: datetime = Field(default_factory=datetime.now)
+
+
+class StoredDomain(BaseModel):
+    """Unique domain record with sighting counts and enrichment."""
+
+    domain: str
+    tech: List[str] = Field(default_factory=list)
+    first_seen: datetime
+    last_seen: datetime = Field(default_factory=datetime.now)
+    seen_count: int = 1
+    category: Optional[str] = None
     title: Optional[str] = None
     domain_age_days: Optional[int] = None
-    creation_date: Optional[str] = None
     ssl_issuer: Optional[str] = None
-    ssl_valid_from: Optional[str] = None
-    ssl_valid_to: Optional[str] = None
-
-
-class AlertConfig(BaseModel):
-    """Configuration for a single alert delivery method."""
-
-    alert_type: Literal["email", "webhook"] = "webhook"
-    target: str
 
 
 class ScheduledJob(BaseModel):
-    """A recurring monitoring job persisted in the SQLite store.
+    """Background monitoring job persisted in the store."""
 
-    The scheduler executes the corresponding dork search on the given
-    interval, identifies domains never seen before, enriches them and
-    fires the configured alert.
-    """
-
-    id: Optional[str] = Field(default=None, alias="id")
+    id: str = Field(default_factory=lambda: str(uuid4()))
     name: str
-    category: Optional[str] = None
-    tech: Optional[str] = None
-    term: str = ""
-    interval_hours: int = Field(24, ge=1, le=168)
-    alert: AlertConfig
-    enabled: bool = True
+    tech: str
+    term: Optional[str] = None
+    interval_hours: int = Field(6, ge=1)
+    alert: Dict[str, Any]
     last_run: Optional[datetime] = None
     last_alerted: Optional[datetime] = None
+
+
+class AlertConfig(BaseModel):
+    """Alert delivery configuration (used by scheduler)."""
+
+    alert_type: str = Field(..., pattern="^(email|webhook)$")
+    target: str
+
+
+__all__ = [
+    "Category",
+    "DorkPattern",
+    "DiscoveryResult",
+    "SearchHistory",
+    "StoredDomain",
+    "ScheduledJob",
+    "AlertConfig",
+]
