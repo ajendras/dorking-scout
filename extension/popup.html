@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dork Scout</title>
+    <script src="popup.js" defer></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&amp;family=Inter:wght@400;500&amp;display=swap');
+        
+        :root {
+            --terracotta: #c56a3b;
+            --olive: #6f8a5e;
+            --sand: #f8f1e3;
+        }
+        
+        body {
+            width: 360px;
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', system_ui, sans-serif;
+            background: var(--sand);
+            color: #3f2a1e;
+            line-height: 1.5;
+        }
+        
+        .header {
+            background: linear-gradient(135deg, var(--terracotta), #a85a32);
+            color: white;
+            padding: 14px 16px;
+            font-size: 15px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        
+        .header::before {
+            content: "🔎";
+            font-size: 18px;
+        }
+        
+        .container {
+            padding: 16px;
+        }
+        
+        #status {
+            font-size: 13px;
+            color: #5c4635;
+            margin-bottom: 12px;
+            min-height: 20px;
+        }
+        
+        .tech-list {
+            max-height: 340px;
+            overflow-y: auto;
+            border-radius: 8px;
+            background: white;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+        }
+        
+        .tech-item {
+            padding: 12px 16px;
+            border-bottom: 1px solid #f0e6d2;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .tech-item:hover {
+            background: #f8f1e3;
+        }
+        
+        .tech-item:last-child {
+            border-bottom: none;
+        }
+        
+        .tech-name {
+            font-weight: 600;
+            color: #3f2a1e;
+            font-size: 14px;
+        }
+        
+        .btn {
+            background: var(--olive);
+            color: white;
+            border: none;
+            padding: 5px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        
+        .btn:hover {
+            background: #5a7250;
+            transform: translateY(-1px);
+        }
+        
+        .dork-item {
+            padding: 12px 16px;
+            background: white;
+            border-bottom: 1px solid #f0e6d2;
+            font-size: 13px;
+            word-break: break-all;
+        }
+        
+        .dork-item:last-child {
+            border-bottom: none;
+        }
+        
+        .back-btn {
+            background: transparent;
+            border: 1px solid #c56a3b;
+            color: #c56a3b;
+            padding: 4px 10px;
+            margin-bottom: 12px;
+            border-radius: 6px;
+            font-size: 12px;
+        }
+        
+        .footer {
+            font-size: 10px;
+            text-align: center;
+            color: #8c7459;
+            padding: 12px;
+            border-top: 1px solid #e5d9c0;
+        }
+        
+        .no-results {
+            padding: 30px 20px;
+            text-align: center;
+            color: #8c7459;
+            font-size: 13px;
+        }
+        
+        .dork-signature {
+            font-family: monospace;
+            background: #f8f1e3;
+            padding: 8px;
+            border-radius: 4px;
+            margin: 8px 0;
+            font-size: 12px;
+            color: #3f2a1e;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">Dork Scout Companion</div>
+    <div class="container" id="main">
+        <div id="status">Scanning page for technologies...</div>
+        <div id="view-detections">
+            <div class="tech-list" id="tech-list"></div>
+        </div>
+        
+        <div id="view-dorks" style="display: none;">
+            <button onclick="goBack()" class="back-btn">← Back to detections</button>
+            <div id="current-tech" style="font-weight: 600; margin-bottom: 8px; color: #c56a3b;"></div>
+            <div id="dorks-list" class="tech-list"></div>
+        </div>
+    </div>
+    <div class="footer">
+        Works with Wappalyzer-style detection • 
+        <span onclick="openDorkScout()" style="cursor:pointer;text-decoration:underline;">Open Dork Scout</span>
+    </div>
+</body>
+</html>

@@ -92,6 +92,12 @@ Domain age from Wayback Machine CDX API and SSL cert details from crt.sh (free, 
 Local LLM (Ollama) helper generates high-quality dorks for unknown or new tech
 </td>
 </tr>
+<tr>
+<td colspan="3">
+🧩 <b>Browser Extension</b><br>
+Companion Chrome extension that detects technologies on the current page (Wappalyzer-style signatures) and offers one-click dork suggestions that open Google with the exact curated pattern
+</td>
+</tr>
 </table>
 
 ## 🗄️ Persistent Storage
@@ -244,6 +250,20 @@ curl "http://127.0.0.1:8000/api/history?limit=10"
 
 Returns recent searches, result counts and total unique domains persisted in the SQLite store. The `DiscoveryStore` is automatically initialised on app startup and persists across runs.
 
+### Browser Extension
+
+A companion Chrome/Edge extension lives in the `extension/` directory. It performs lightweight technology detection on the current page using the same regex signatures as the Python backend (inspired by Wappalyzer). Detected technologies that match the curated dork database are presented with one-click buttons that open Google using the exact high-signal dork.
+
+**Installation**
+
+1. Open `chrome://extensions/` (or `edge://extensions/`)
+2. Enable **Developer mode**
+3. Click **Load unpacked** and select the `extension` folder
+4. Visit any site using a known technology (Shopify, Stripe, WooCommerce, etc.)
+5. Click the Dork Scout icon in the toolbar
+
+The extension works completely offline with a bundled copy of signatures and dorks; it will also attempt to call the local Dork Scout API (`/api/dorks`) when the server is running for the freshest patterns.
+
 <details><summary>Exporting results programmatically</summary>
 
 ```python
@@ -294,7 +314,7 @@ See `tests/test_dorks.py` for the validation test suite. New contributions must 
 ```mermaid
 flowchart TD
     UI[Browser + HTMX] --> Web[web.py routes<br/>index, category_page]
-    Web --> API[api.py router<br/>/api/search, /api/export, /api/history, /api/generate_dorks]
+    Web --> API[api.py router<br/>/api/search, /api/export, /api/history, /api/generate_dorks, /api/dorks]
     API --> Dorks[dorks.py<br/>get_dorks() • build_query() • generate_dorks_for_tech()]
     Dorks --> Config[config.py<br/>DORK_DB + SEARCH_ENGINES + OLLAMA_CONFIG + DB_PATH]
     API --> Search[search.py<br/>SearchClient.search_with_rate_limit() (Google/Bing/DDG/Baidu/Yandex)]
@@ -305,9 +325,12 @@ flowchart TD
     Store --> DB[(dorkscout.db)]
     API --> Export[CSV/JSON StreamingResponse]
     LLM[Local Ollama] --> Dorks
+    EXT[Browser Extension<br/>(extension/)] --> DETECT[Content script<br/>Wappalyzer-style detection]
+    EXT --> POPUP[Popup UI<br/>shows detected tech + one-click Google dorks]
+    POPUP --> API
 ```
 
-The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the curated database, `search.py` handles async multi-engine queries with noise filtering, `detector.py` adds technology fingerprints plus domain/SSL enrichment from free sources, `store.py` provides persistent history, and FastAPI routers (`api.py`, `web.py`) serve both the organic UI and JSON endpoints. All heavy lifting runs in background workers so the HTMX interface stays responsive. The new local-LLM helper lives in `dorks.py` and talks directly to Ollama's REST API.
+The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the curated database, `search.py` handles async multi-engine queries with noise filtering, `detector.py` adds technology fingerprints plus domain/SSL enrichment from free sources, `store.py` provides persistent history, and FastAPI routers (`api.py`, `web.py`) serve both the organic UI and JSON endpoints. All heavy lifting runs in background workers so the HTMX interface stays responsive. The new local-LLM helper lives in `dorks.py` and talks directly to Ollama's REST API. The companion browser extension brings the same detection logic to the browser and surfaces curated dorks instantly.
 
 ## 📁 Project structure
 
@@ -315,6 +338,11 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 .
 ├── pyproject.toml                 # Metadata, dependencies, console_scripts entry 'dork-scout'
 ├── dorks.json                     # Optional override (merged with DEFAULT_DORK_DB)
+├── extension/                     # Companion browser extension (Manifest V3)
+│   ├── manifest.json
+│   ├── popup.html
+│   ├── popup.js
+│   └── content.js
 ├── src/dorkscout/
 │   ├── main.py                    # create_app() FastAPI factory + run() uvicorn entrypoint
 │   ├── config.py                  # DEFAULT_DORK_DB, SEARCH_ENGINES, DB_PATH, load functions
@@ -323,7 +351,7 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 │   ├── search.py                  # SearchClient (async Google/Bing/DDG/Baidu/Yandex) + parse_results
 │   ├── detector.py                # detect_technologies + TECH_SIGNATURES + async enrichment
 │   ├── store.py                   # Persistent SQLite layer (DiscoveryStore)
-│   ├── api.py                     # /api/categories, /api/search (POST), /api/export, /api/history, /api/generate_dorks
+│   ├── api.py                     # /api/categories, /api/search (POST), /api/export, /api/history, /api/generate_dorks, /api/dorks
 │   └── web.py                     # UI routes serving Jinja2 templates with HTMX
 ├── examples/
 │   ├── discover_payments.py       # Stripe + gift-card example with CSV export
@@ -350,7 +378,7 @@ The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks(
 - [x] Persistent SQLite store for discovered domains with search history
 - [x] Add domain age and SSL cert metadata enrichment using free sources
 - [x] Implement local LLM helper to generate new dorks for unknown tech
-- [ ] Create companion browser extension that suggests dorks from Wappalyzer detections
+- [x] Create companion browser extension that suggests dorks from Wappalyzer detections
 - [ ] Add scheduled background jobs with email or webhook alerts for fresh domains
 - [ ] Build analytics dashboard showing tech distribution graphs across results
 - [ ] Support advanced operators like filetype:pdf and intitle: for document hunting

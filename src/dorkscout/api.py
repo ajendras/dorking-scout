@@ -11,6 +11,8 @@ Endpoints:
 - GET /api/domains — lists persisted unique domains (optionally filtered)
 - POST /api/generate_dorks — uses the local LLM helper to suggest new
   dork patterns for unknown technologies (requires Ollama locally)
+- GET /api/dorks — returns dork patterns for a technology (used by the
+  companion browser extension)
 
 All endpoints validate input, handle errors gracefully and respect rate limits.
 Search is intentionally limited in scope to keep responses under 4 seconds.
@@ -343,6 +345,29 @@ def list_technologies():
     Useful for autocomplete dropdowns in the niche explorer.
     """
     return {"techs": list_all_techs()}
+
+
+@router.get("/dorks")
+def get_tech_dorks(
+    tech: Optional[str] = Query(None, description="Technology name")
+) -> Dict[str, Any]:
+    """Return dork patterns for a given technology.
+
+    Used by the companion browser extension to retrieve the exact
+    curated signatures when the local server is running.
+    """
+    if not tech:
+        return {"techs": list_all_techs()}
+
+    try:
+        patterns = get_dorks(tech=tech)
+        return {
+            "tech": tech,
+            "patterns": [p.model_dump(mode="json") for p in patterns],
+            "count": len(patterns),
+        }
+    except ValueError:
+        return {"tech": tech, "patterns": [], "count": 0}
 
 
 @router.post("/generate_dorks")

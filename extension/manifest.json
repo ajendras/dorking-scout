@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Dork Scout Companion",
+  "version": "0.1.0",
+  "description": "Detects technologies on the current page (Wappalyzer-style) and suggests curated dorks from the Dork Scout database",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Dork Scout Companion"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "icons": {
+    "16": "https://via.placeholder.com/16/c56a3b/ffffff?text=DS",
+    "48": "https://via.placeholder.com/48/c56a3b/ffffff?text=DS",
+    "128": "https://via.placeholder.com/128/c56a3b/ffffff?text=DS"
+  }
+}
