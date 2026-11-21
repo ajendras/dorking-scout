@@ -1,76 +1,89 @@
-"""Persistent SQLite store for search history and discovered domains.
+"""Persistent SQLite storage for searches, unique domains and scheduled jobs.
 
-DiscoveryStore provides methods to record searches, upsert domains with
-first_seen / last_seen / seen_count tracking and tech accumulation. Supports
-both file-based persistence (default dorkscout.db) and in-memory mode for
-testing. Tables are created automatically on initialization.
+DiscoveryStore manages three tables:
+- searches: history of every query performed (manual or scheduled)
+- domains: accumulated unique second-level domains with first/last seen,
+  count, joined tech list and last_alerted timestamp
+- scheduled_jobs: configuration for background monitoring jobs together
+  with alert preferences, last_run and last_alerted.
+
+All timestamps are ISO strings in UTC. The store is attached to
+app.state.store on startup and used by API endpoints and the AlertScheduler.
+
+Supports in_memory mode for tests.
 """
 
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
-from .config import get_db_path
-from .models import DiscoveryResult
+from .config import get_alert_config, get_db_path
+from .models import DiscoveryResult, ScheduledJob
 
 
 class DiscoveryStore:
-    """SQLite backed store for searches and unique domains with history."""
-
-    def __init__(self, db_path: Optional[Union[str, Path]] = None) -> None:
-        """Initialize store, create tables. For ':memory:' keeps a live connection."""
-        if db_path is None:
-            self.db_path: Union[str, Path] = get_db_path()
-        elif isinstance(db_path, str) and db_path == ":memory:":
-            self.db_path = ":memory:"
+    def __init__(self, db_path: Optional[Path] = None, in_memory: bool = False):
+        if in_memory:
+            self.conn = sqlite3.connect(":memory:", check_same_thread=False)
         else:
-            self.db_path = Path(db_path) if isinstance(db_path, str) else db_path
+            path = db_path or get_db_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.conn = sqlite3.connect(str(path), check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self._create_tables()
 
-        self._conn: Optional[sqlite3.Connection] = None
-        if self.db_path == ":memory:":
-            self._conn = sqlite3.connect(":memory:", check_same_thread=False)
-            self._init_tables()
-        else:
-            self._init_tables()
-
-    def _init_tables(self) -> None:
-        """Create schema if not exists. Uses live conn for memory, new conn for file."""
-        if self.db_path == ":memory:" and self._conn is not None:
-            conn = self._conn
-            close = False
-        else:
-            conn = sqlite3.connect(str(self.db_path))
-            close = True
-
-        try:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS searches (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    query TEXT NOT NULL,
-                    category TEXT,
-                    tech TEXT,
-                    term TEXT DEFAULT '',
-                    timestamp TEXT NOT NULL,
-                    results_count INTEGER DEFAULT 0,
-                    engine TEXT DEFAULT 'multi'
-                );
-
-                CREATE TABLE IF NOT EXISTS domains (
-                    domain TEXT PRIMARY KEY,
-                    techs TEXT DEFAULT '[]',
-                    first_seen TEXT NOT NULL,
-                    last_seen TEXT NOT NULL,
-                    seen_count INTEGER DEFAULT 1
-                );
-                """
+    def _create_tables(self):
+        """Create all tables if they do not exist."""
+        # searches table
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS searches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                query TEXT NOT NULL,
+                category TEXT,
+                tech TEXT,
+                term TEXT,
+                engine TEXT,
+                result_count INTEGER,
+                timestamp TEXT DEFAULT (datetime('now', 'utc'))
             )
-            conn.commit()
-        finally:
-            if close:
-                conn.close()
+            """
+        )
+        # domains table
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS domains (
+                domain TEXT PRIMARY KEY,
+                first_seen TEXT,
+                last_seen TEXT,
+                seen_count INTEGER DEFAULT 1,
+                techs TEXT,
+                last_alerted TEXT
+            )
+            """
+        )
+        # scheduled_jobs table
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduled_jobs (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                category TEXT,
+                tech TEXT,
+                term TEXT DEFAULT "",
+                interval_hours INTEGER DEFAULT 24,
+                alert_type TEXT NOT NULL CHECK (alert_type IN ('email', 'webhook')),
+                alert_target TEXT NOT NULL,
+                enabled INTEGER DEFAULT 1,
+                last_run TEXT,
+                last_alerted TEXT
+            )
+            """
+        )
+        self.conn.commit()
 
     def record_search(
         self,
@@ -80,202 +93,155 @@ class DiscoveryStore:
         tech: Optional[str] = None,
         term: str = "",
         engine: str = "multi",
-    ) -> int:
-        """Record a search execution and its resulting domains.
+    ) -> None:
+        """Record a search and update (or insert) the unique domains ledger."""
+        now = datetime.now(timezone.utc).isoformat()
+        result_count = len(results)
 
-        Returns the generated search_id. Domains are upserted; first_seen
-        is preserved on conflicts while last_seen, seen_count and techs
-        are updated.
-        """
-        if not query or not results:
-            return 0
+        self.conn.execute(
+            """
+            INSERT INTO searches
+            (query, category, tech, term, engine, result_count, timestamp)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (query, category, tech, term, engine, result_count, now),
+        )
 
-        timestamp = datetime.now(timezone.utc).isoformat()
-
-        if self.db_path == ":memory:" and self._conn is not None:
-            conn = self._conn
-            close_after = False
-        else:
-            conn = sqlite3.connect(str(self.db_path))
-            close_after = True
-
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
+        for result in results:
+            techs_str = ";".join(sorted(set(result.tech))) if result.tech else ""
+            self.conn.execute(
                 """
-                INSERT INTO searches
-                (query, category, tech, term, timestamp, results_count, engine)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO domains (domain, first_seen, last_seen, seen_count, techs, last_alerted)
+                VALUES (?, ?, ?, 1, ?, NULL)
+                ON CONFLICT(domain) DO UPDATE SET
+                    last_seen = ?,
+                    seen_count = seen_count + 1,
+                    techs = COALESCE(
+                        CASE
+                            WHEN techs IS NULL OR techs = '' THEN ?
+                            WHEN instr(';' || techs || ';', ';' || ? || ';') = 0 THEN techs || ';' || ?
+                            ELSE techs
+                        END,
+                        ?
+                    )
                 """,
-                (query, category, tech, term, timestamp, len(results), engine),
+                (result.domain, now, now, techs_str, now, techs_str, techs_str, techs_str, techs_str),
             )
-            search_id = cursor.lastrowid or 0
-
-            now = timestamp
-            for result in results:
-                domain = result.domain.lower()
-                tech_list = sorted({t for t in (result.tech or [])})
-                tech_str = json.dumps(tech_list)
-
-                cursor.execute(
-                    "SELECT techs, first_seen, seen_count FROM domains WHERE domain = ?",
-                    (domain,),
-                )
-                row = cursor.fetchone()
-                if row:
-                    existing_techs: List[str] = json.loads(row[0]) if row[0] else []
-                    merged = sorted(set(existing_techs + tech_list))
-                    merged_str = json.dumps(merged)
-                    new_count = int(row[2]) + 1
-                    cursor.execute(
-                        """
-                        UPDATE domains
-                        SET techs = ?, last_seen = ?, seen_count = ?
-                        WHERE domain = ?
-                        """,
-                        (merged_str, now, new_count, domain),
-                    )
-                else:
-                    cursor.execute(
-                        """
-                        INSERT INTO domains (domain, techs, first_seen, last_seen, seen_count)
-                        VALUES (?, ?, ?, ?, 1)
-                        """,
-                        (domain, tech_str, now, now),
-                    )
-
-            conn.commit()
-            return search_id
-        finally:
-            if close_after:
-                conn.close()
+        self.conn.commit()
 
     def get_search_history(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """Return recent searches as list of dicts."""
-        if self.db_path == ":memory:" and self._conn is not None:
-            conn = self._conn
-            close_after = False
-        else:
-            conn = sqlite3.connect(str(self.db_path))
-            close_after = True
-
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                SELECT id, query, category, tech, term, timestamp,
-                       results_count, engine
-                FROM searches
-                ORDER BY timestamp DESC
-                LIMIT ?
-                """,
-                (limit,),
-            )
-            rows = cursor.fetchall()
-            history = []
-            for row in rows:
-                history.append(
-                    {
-                        "id": row[0],
-                        "query": row[1],
-                        "category": row[2],
-                        "tech": row[3],
-                        "term": row[4],
-                        "timestamp": row[5],
-                        "results_count": row[6],
-                        "engine": row[7],
-                    }
-                )
-            return history
-        finally:
-            if close_after:
-                conn.close()
+        """Return recent searches ordered by timestamp desc."""
+        cursor = self.conn.execute(
+            """
+            SELECT * FROM searches
+            ORDER BY timestamp DESC LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
 
     def get_total_unique_domains(self) -> int:
-        """Return total number of unique domains stored."""
-        if self.db_path == ":memory:" and self._conn is not None:
-            conn = self._conn
-            close_after = False
-        else:
-            conn = sqlite3.connect(str(self.db_path))
-            close_after = True
-
-        try:
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM domains")
-            row = cursor.fetchone()
-            return row[0] if row else 0
-        finally:
-            if close_after:
-                conn.close()
+        """Count distinct domains ever discovered."""
+        cursor = self.conn.execute("SELECT COUNT(*) as cnt FROM domains")
+        row = cursor.fetchone()
+        return row["cnt"] if row else 0
 
     def get_unique_domains(
-        self, limit: int = 50, tech: Optional[str] = None
+        self, limit: int = 50, tech: Optional[str] = None, since: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Return list of unique domains, optionally filtered by tech."""
-        if self.db_path == ":memory:" and self._conn is not None:
-            conn = self._conn
-            close_after = False
-        else:
-            conn = sqlite3.connect(str(self.db_path))
-            close_after = True
+        """Return unique domains, optionally filtered by tech or first_seen since a timestamp."""
+        query = "SELECT * FROM domains WHERE 1=1"
+        params: List[Any] = []
+        if tech:
+            query += " AND techs LIKE ?"
+            params.append(f"%{tech}%")
+        if since:
+            query += " AND first_seen > ?"
+            params.append(since)
+        query += " ORDER BY first_seen DESC LIMIT ?"
+        params.append(limit)
 
-        try:
-            cursor = conn.cursor()
-            if tech:
-                cursor.execute(
-                    """
-                    SELECT domain, techs, first_seen, last_seen, seen_count
-                    FROM domains
-                    """
-                )
-                rows = cursor.fetchall()
-                result: List[Dict[str, Any]] = []
-                t_lower = tech.lower()
-                for row in rows[:limit]:
-                    techs = json.loads(row[1]) if row[1] else []
-                    if any(t_lower == t.lower() for t in techs):
-                        result.append(
-                            {
-                                "domain": row[0],
-                                "techs": techs,
-                                "first_seen": row[2],
-                                "last_seen": row[3],
-                                "seen_count": row[4],
-                            }
-                        )
-                return result
-            else:
-                cursor.execute(
-                    """
-                    SELECT domain, techs, first_seen, last_seen, seen_count
-                    FROM domains
-                    LIMIT ?
-                    """,
-                    (limit,),
-                )
-                rows = cursor.fetchall()
-                result = []
-                for row in rows:
-                    result.append(
-                        {
-                            "domain": row[0],
-                            "techs": json.loads(row[1]) if row[1] else [],
-                            "first_seen": row[2],
-                            "last_seen": row[3],
-                            "seen_count": row[4],
-                        }
-                    )
-                return result
-        finally:
-            if close_after:
-                conn.close()
+        cursor = self.conn.execute(query, params)
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
 
-    def close(self) -> None:
-        """Close the connection if it's the in-memory one."""
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
+    def add_scheduled_job(self, job: ScheduledJob) -> str:
+        """Persist a ScheduledJob (insert or update). Returns its id."""
+        if not job.id:
+            job.id = str(uuid.uuid4())
 
+        data = {
+            "id": job.id,
+            "name": job.name,
+            "category": job.category,
+            "tech": job.tech,
+            "term": job.term,
+            "interval_hours": job.interval_hours,
+            "alert_type": job.alert.alert_type,
+            "alert_target": job.alert.target,
+            "enabled": 1 if job.enabled else 0,
+            "last_run": job.last_run.isoformat() if job.last_run else None,
+            "last_alerted": job.last_alerted.isoformat() if job.last_alerted else None,
+        }
+        self.conn.execute(
+            """
+            INSERT INTO scheduled_jobs
+            (id, name, category, tech, term, interval_hours,
+             alert_type, alert_target, enabled, last_run, last_alerted)
+            VALUES (:id, :name, :category, :tech, :term, :interval_hours,
+                    :alert_type, :alert_target, :enabled, :last_run, :last_alerted)
+            ON CONFLICT(id) DO UPDATE SET
+                name = :name,
+                category = :category,
+                tech = :tech,
+                term = :term,
+                interval_hours = :interval_hours,
+                alert_type = :alert_type,
+                alert_target = :alert_target,
+                enabled = :enabled,
+                last_run = :last_run,
+                last_alerted = :last_alerted
+            """,
+            data,
+        )
+        self.conn.commit()
+        return job.id
 
-__all__ = ["DiscoveryStore"]
+    def get_scheduled_jobs(self) -> List[Dict[str, Any]]:
+        """Return all scheduled jobs as dicts (ready for ScheduledJob.model_validate)."""
+        cursor = self.conn.execute(
+            "SELECT * FROM scheduled_jobs ORDER BY name"
+        )
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+
+    def update_job_last_run(self, job_id: str, timestamp: str) -> None:
+        """Update last_run for a job."""
+        self.conn.execute(
+            "UPDATE scheduled_jobs SET last_run = ? WHERE id = ?",
+            (timestamp, job_id),
+        )
+        self.conn.commit()
+
+    def mark_domains_alerted(self, domains: List[str], timestamp: str) -> None:
+        """Mark a list of domains as alerted (updates last_alerted)."""
+        if not domains:
+            return
+        placeholders = ",".join(["?"] * len(domains))
+        self.conn.execute(
+            f"UPDATE domains SET last_alerted = ? WHERE domain IN ({placeholders})",
+            [timestamp] + domains,
+        )
+        self.conn.commit()
+
+    def delete_scheduled_job(self, job_id: str) -> bool:
+        """Remove a scheduled job by id. Returns True if a row was deleted."""
+        cursor = self.conn.execute(
+            "DELETE FROM scheduled_jobs WHERE id = ?", (job_id,)
+        )
+        self.conn.commit()
+        return cursor.rowcount > 0
+
+    def close(self):
+        self.conn.close()

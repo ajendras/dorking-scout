@@ -7,7 +7,8 @@ support for Baidu and Yandex is now included. Also defines DB_PATH
 and get_db_path() for the persistent SQLite store.
 
 Local LLM (Ollama) configuration for the dork generation helper is also
-defined here.
+defined here. New ALERT_CONFIG block supplies SMTP credentials (for
+email alerts) and webhook defaults used by the AlertScheduler.
 """
 
 import copy
@@ -173,6 +174,24 @@ OLLAMA_CONFIG: Dict[str, Any] = {
     "timeout": 45.0,
 }
 
+# SMTP and webhook settings used by AlertScheduler for fresh-domain alerts.
+# Credentials are intentionally left blank; users must edit them before
+# enabling email alerts. Webhook headers are sent with every POST.
+ALERT_CONFIG: Dict[str, Any] = {
+    "smtp": {
+        "host": "smtp.example.com",
+        "port": 587,
+        "user": None,
+        "password": None,
+        "from_email": "alerts@dorkscout.local",
+        "use_tls": True,
+    },
+    "webhook": {
+        "headers": {"User-Agent": "DorkScout-Alert/0.2"},
+    },
+    "cooldown_minutes": 30,
+}
+
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """Return a new dict with override deeply merged into base.
@@ -327,6 +346,15 @@ def get_llm_config() -> Dict[str, Any]:
     to read from environment variables.
     """
     return OLLAMA_CONFIG.copy()
+
+
+def get_alert_config() -> Dict[str, Any]:
+    """Return a copy of the alert configuration (SMTP, webhook, cooldown).
+
+    Used by AlertScheduler when delivering email or webhook notifications
+    for freshly discovered domains.
+    """
+    return copy.deepcopy(ALERT_CONFIG)
 
 
 def get_db_path() -> Path:
