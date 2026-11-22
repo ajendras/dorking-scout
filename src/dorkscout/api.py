@@ -13,6 +13,8 @@ Endpoints:
   dork patterns for unknown technologies (requires Ollama locally)
 - GET /api/dorks — returns dork patterns for a technology (used by the
   companion browser extension)
+- GET /api/analytics — returns aggregated tech distribution used by the
+  new analytics dashboard (pie/bar charts + table)
 
 All endpoints validate input, handle errors gracefully and respect rate limits.
 Search is intentionally limited in scope to keep responses under 4 seconds.
@@ -31,7 +33,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from .config import get_search_engines
 from .detector import detect_technologies, enrich_discovery_results
 from .dorks import build_query, generate_dorks_for_tech, get_dorks, list_all_techs, load_dorks
-from .models import Category, DiscoveryResult
+from .models import Category, DiscoveryResult, AnalyticsSummary
 from .search import SearchClient
 from .store import DiscoveryStore
 
@@ -409,6 +411,36 @@ async def generate_dorks(
         raise HTTPException(
             status_code=500, detail=f"LLM generation failed: {str(exc)}"
         ) from exc
+
+
+@router.get("/analytics", response_model=AnalyticsSummary)
+def get_analytics(request: Request) -> Dict[str, Any]:
+    """Return aggregated analytics for the dashboard.
+
+    Pulls tech distribution from the persistent store (counts how many
+    domains mention each technology). Used by the /analytics UI to
+    render Chart.js pie and bar graphs plus the summary table.
+    """
+    store: Optional[DiscoveryStore] = getattr(request.app.state, "store", None)
+    if not store:
+        raise HTTPException(status_code=500, detail="Store not initialized")
+
+    distribution = store.get_tech_distribution()
+    total = store.get_total_unique_domains()
+
+    # Top 10 for the bar chart
+    top_techs = sorted(
+        [{"tech": k, "count": v} for k, v in distribution.items()],
+        key=lambda x: x["count"],
+        reverse=True,
+    )[:10]
+
+    return {
+        "total_domains": total,
+        "tech_distribution": distribution,
+        "top_techs": top_techs,
+        "last_updated": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 __all__ = ["router"]

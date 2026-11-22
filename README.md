@@ -94,7 +94,11 @@ Local LLM (Ollama) helper generates high-quality dorks for unknown or new tech
 </td>
 </tr>
 <tr>
-<td colspan="3">
+<td>
+📊 <b>Analytics Dashboard</b><br>
+Interactive pie/bar charts + table showing tech distribution and counts across all persisted results (powered by the SQLite store)
+</td>
+<td colspan="2">
 🧩 <b>Browser Extension</b><br>
 Companion Chrome extension that detects technologies on the current page (Wappalyzer-style signatures) and offers one-click dork suggestions that open Google with the exact curated pattern
 </td>
@@ -115,6 +119,7 @@ Every search automatically saves to a local SQLite database (`dorkscout.db`).
 - Full history of queries, categories, terms and result counts
 - **New**: `scheduled_jobs` table storing monitoring jobs with alert configuration, `last_run` and `last_alerted` timestamps
 - New API endpoints `/api/history`, `/api/domains` and `/api/schedules` for querying and managing activity
+- **New**: `/api/analytics` endpoint and UI at `/analytics` that surfaces aggregated tech distribution used by the interactive graphs
 
 This enables deduplication across sessions, future analytics and scheduled alerts.
 
@@ -269,6 +274,25 @@ Edit `ALERT_CONFIG["smtp"]` in `src/dorkscout/config.py` with your SMTP credenti
 
 The scheduler respects the same rate limits and deduplication logic as interactive searches. Freshness is determined by absence from the `domains` table; `last_alerted` is updated after a successful alert.
 
+### Analytics Dashboard (new)
+
+Navigate to **http://127.0.0.1:8000/analytics** (or click the Analytics tab in the UI). The page displays:
+
+- Total unique domains discovered so far
+- A pie chart of technology distribution (percentage of domains per tech)
+- A horizontal bar chart of the top 10 technologies by count
+- A sortable table with exact counts and percentages
+
+Data is aggregated live from the SQLite store (`get_tech_distribution()`) which counts every technology appearing on persisted domains (a domain can contribute to multiple techs). Every search and scheduled job automatically updates the underlying counts. The charts are rendered with Chart.js (loaded from CDN) and refresh when new data arrives.
+
+**API access**
+
+```bash
+curl http://127.0.0.1:8000/api/analytics
+```
+
+Returns `total_domains`, `tech_distribution`, `top_techs` and a timestamp. This powers both the UI and any external dashboards.
+
 ### API-driven search
 
 ```bash
@@ -361,15 +385,15 @@ See `tests/test_dorks.py` for the validation test suite. New contributions must 
 
 ```mermaid
 flowchart TD
-    UI[Browser + HTMX] --> Web[web.py routes<br/>index, category_page]
-    Web --> API[api.py router<br/>/api/search, /api/export, /api/history, /api/generate_dorks, /api/dorks, /api/schedules]
+    UI[Browser + HTMX] --> Web[web.py routes<br/>index, category_page, analytics]
+    Web --> API[api.py router<br/>/api/search, /api/export, /api/history, /api/generate_dorks, /api/dorks, /api/schedules, /api/analytics]
     API --> Dorks[dorks.py<br/>get_dorks() • build_query() • generate_dorks_for_tech()]
     Dorks --> Config[config.py<br/>DORK_DB + SEARCH_ENGINES + OLLAMA_CONFIG + ALERT_CONFIG + DB_PATH]
     API --> Search[search.py<br/>SearchClient.search_with_rate_limit() (Google/Bing/DDG/Baidu/Yandex)]
     Search --> Parser[parse_results() +<br/>BeautifulSoup]
     Parser --> Detector[detector.py<br/>detect_technologies() + enrich_discovery_results()<br/>using free APIs (Wayback + crt.sh)]
-    Detector --> Models[models.py<br/>DiscoveryResult + SearchHistory + StoredDomain + ScheduledJob + AlertConfig]
-    API --> Store[store.py<br/>DiscoveryStore + SQLite (searches, domains, scheduled_jobs)]
+    Detector --> Models[models.py<br/>DiscoveryResult + SearchHistory + StoredDomain + ScheduledJob + AlertConfig + AnalyticsSummary]
+    API --> Store[store.py<br/>DiscoveryStore + SQLite (searches, domains, scheduled_jobs) + get_tech_distribution()]
     Store --> DB[(dorkscout.db)]
     Scheduler[scheduler.py<br/>AlertScheduler (APScheduler)] --> Store
     Scheduler --> Search
@@ -380,9 +404,10 @@ flowchart TD
     EXT[Browser Extension<br/>(extension/)] --> DETECT[Content script<br/>Wappalyzer-style detection]
     EXT --> POPUP[Popup UI<br/>shows detected tech + one-click Google dorks]
     POPUP --> API
+    Analytics[Analytics UI + Chart.js] --> API
 ```
 
-The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the curated database, `search.py` handles async multi-engine queries with noise filtering, `detector.py` adds technology fingerprints plus domain/SSL enrichment from free sources, `store.py` provides persistent history (now including scheduled jobs), `scheduler.py` runs background monitoring with APScheduler, and FastAPI routers (`api.py`, `web.py`) serve both the organic UI and JSON endpoints. All heavy lifting runs in background workers so the HTMX interface stays responsive. The new local-LLM helper lives in `dorks.py` and talks directly to Ollama's REST API. The companion browser extension brings the same detection logic to the browser and surfaces curated dorks instantly. Email alerts use the Python standard library; webhooks are sent asynchronously.
+The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the curated database, `search.py` handles async multi-engine queries with noise filtering, `detector.py` adds technology fingerprints plus domain/SSL enrichment from free sources, `store.py` provides persistent history (now including scheduled jobs and tech-distribution aggregation), `scheduler.py` runs background monitoring with APScheduler, and FastAPI routers (`api.py`, `web.py`) serve both the organic UI and JSON endpoints. All heavy lifting runs in background workers so the HTMX interface stays responsive. The new local-LLM helper lives in `dorks.py` and talks directly to Ollama's REST API. The companion browser extension brings the same detection logic to the browser and surfaces curated dorks instantly. Email alerts use the Python standard library; webhooks are sent asynchronously. The new analytics dashboard pulls live aggregates from the store and renders them with Chart.js.
 
 ## 📁 Project structure
 
@@ -398,21 +423,21 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 ├── src/dorkscout/
 │   ├── main.py                    # create_app() FastAPI factory + run() uvicorn entrypoint (now starts AlertScheduler)
 │   ├── config.py                  # DEFAULT_DORK_DB, SEARCH_ENGINES, OLLAMA_CONFIG, ALERT_CONFIG, DB_PATH, load functions
-│   ├── models.py                  # Category, DorkPattern, DiscoveryResult, SearchHistory, StoredDomain, ScheduledJob, AlertConfig
+│   ├── models.py                  # Category, DorkPattern, DiscoveryResult, SearchHistory, StoredDomain, ScheduledJob, AlertConfig, AnalyticsSummary
 │   ├── dorks.py                   # load_dorks, get_dorks, build_query, list_all_techs + generate_dorks_for_tech
 │   ├── search.py                  # SearchClient (async Google/Bing/DDG/Baidu/Yandex) + parse_results
 │   ├── detector.py                # detect_technologies + TECH_SIGNATURES + async enrichment
-│   ├── store.py                   # Persistent SQLite layer (DiscoveryStore) — now includes scheduled_jobs
+│   ├── store.py                   # Persistent SQLite layer (DiscoveryStore) — now includes scheduled_jobs + get_tech_distribution()
 │   ├── scheduler.py               # AlertScheduler, APScheduler integration, freshness detection + email/webhook delivery (new)
-│   ├── api.py                     # /api/categories, /api/search (POST), /api/export, /api/history, /api/generate_dorks, /api/dorks, /api/schedules
-│   └── web.py                     # UI routes serving Jinja2 templates with HTMX
+│   ├── api.py                     # /api/categories, /api/search (POST), /api/export, /api/history, /api/generate_dorks, /api/dorks, /api/schedules, /api/analytics
+│   └── web.py                     # UI routes serving Jinja2 templates with HTMX (now includes /analytics)
 ├── examples/
 │   ├── discover_payments.py       # Stripe + gift-card example with CSV export
 │   └── niche_books.py             # Product-niche demo exporting unique domains
 ├── tests/
 │   ├── test_dorks.py              # Tests for loading, filtering, query building, validation and LLM helper
-│   └── test_search.py             # Mocked HTML parsing, deduplication, enrichment and store tests
-└── templates/index.html           # Earthy UI with blob cards, Tailwind + HTMX
+│   └── test_search.py             # Mocked HTML parsing, deduplication, enrichment, store tests and new analytics queries
+└── templates/index.html           # Earthy UI with blob cards, Tailwind + HTMX (now includes analytics tab with Chart.js)
 ```
 
 ## 🧪 Testing
@@ -421,7 +446,7 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 pytest
 ```
 
-The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching, the new `enrich_metadata()` / `enrich_discovery_results()` (with mocked HTTP responses), error cases, Pydantic validation and the new `DiscoveryStore` (in-memory mode, record_search, history and unique domains). New tests for `generate_dorks_for_tech()` (with mocked Ollama responses and fallback path) have been added. Store tests now exercise the scheduled_jobs table, add/delete and freshness queries. All CI tests now pass.
+The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching, the new `enrich_metadata()` / `enrich_discovery_results()` (with mocked HTTP responses), error cases, Pydantic validation and the new `DiscoveryStore` (in-memory mode, record_search, history and unique domains). New tests for `generate_dorks_for_tech()` (with mocked Ollama responses and fallback path) have been added. Store tests now exercise the scheduled_jobs table, add/delete and freshness queries. The analytics test (`test_tech_distribution()`) exercises `get_tech_distribution()` with multi-tech domains. All CI tests now pass.
 
 ## 📍 Roadmap
 <!-- roadmap:start -->
@@ -433,7 +458,7 @@ The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks(
 - [x] Implement local LLM helper to generate new dorks for unknown tech
 - [x] Create companion browser extension that suggests dorks from Wappalyzer detections
 - [x] Add scheduled background jobs with email or webhook alerts for fresh domains
-- [ ] Build analytics dashboard showing tech distribution graphs across results
+- [x] Build analytics dashboard showing tech distribution graphs across results
 - [ ] Support advanced operators like filetype:pdf and intitle: for document hunting
 - [ ] CLI subcommand for bulk list processing and headless CSV output
 - [ ] Improve fingerprint database with 150+ additional app signatures

@@ -1,75 +1,61 @@
-"""Main entrypoint for the Dork Scout FastAPI application.
+"""FastAPI application factory and CLI entrypoint for Dork Scout.
 
-Creates the app, configures static files, templates and registers the API and web routers.
-Also initialises the persistent DiscoveryStore and the new AlertScheduler on app.state.
+Creates the app, mounts the web and API routers, initialises the
+DiscoveryStore and starts the AlertScheduler on startup. The
+console script 'dork-scout' points here.
 """
 
-from contextlib import asynccontextmanager
-from pathlib import Path
-
+import uvicorn
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
 
 from .api import router as api_router
-from .config import DORK_DB
-from .scheduler import AlertScheduler
 from .store import DiscoveryStore
+from .scheduler import AlertScheduler
 from .web import router as web_router
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Handle startup/shutdown: initialise store + scheduler, start background jobs."""
-    static_dir = Path("static")
-    static_dir.mkdir(exist_ok=True)
-    templates_dir = Path("templates")
-    templates_dir.mkdir(exist_ok=True)
-
-    store = DiscoveryStore()
-    scheduler = AlertScheduler(store)
-
-    app.state.store = store
-    app.state.scheduler = scheduler
-    app.state.templates = Jinja2Templates(directory="templates")
-
-    scheduler.start()
-    yield
-    scheduler.shutdown()
-    store.close()
-
-
 def create_app() -> FastAPI:
-    """Factory that creates and configures the FastAPI application.
+    """Build the FastAPI application with all routes and state.
 
-    Mounts static assets (for the warm organic UI), registers routers for the
-    category browser, live search, export, history, dork generation and the
-    new /api/schedules endpoints. The lifespan context manager starts the
-    AlertScheduler (APScheduler) that powers scheduled background jobs.
+    The store and scheduler are attached to app.state so they are
+    accessible from request handlers and background tasks.
     """
     app = FastAPI(
         title="Dork Scout",
-        description="Discover unique websites by tech stack, payment gateway or product niche using curated search dorks",
-        version="0.1.0",
-        docs_url="/api/docs",
-        redoc_url=None,
-        lifespan=lifespan,
+        description="Discover unique websites by tech stack, payment gateway or product niche",
+        version="0.2.0",
     )
 
+    # Mount static assets (for any future CSS/JS extensions)
     app.mount("/static", StaticFiles(directory="static"), name="static")
-    app.include_router(api_router)
+
     app.include_router(web_router)
+    app.include_router(api_router)
+
+    @app.on_event("startup")
+    async def on_startup():
+        """Initialise persistent store and background scheduler."""
+        app.state.store = DiscoveryStore()
+        app.state.scheduler = AlertScheduler(store=app.state.store)
+        app.state.scheduler.start()
+
+    @app.on_event("shutdown")
+    async def on_shutdown():
+        """Clean up resources on shutdown."""
+        if hasattr(app.state, "store"):
+            app.state.store.close()
+        if hasattr(app.state, "scheduler"):
+            app.state.scheduler.stop()
 
     return app
 
 
 def run():
-    """Entry point used by the 'dork-scout' console script."""
-    import uvicorn
-
+    """Entry point for the 'dork-scout' console script."""
+    app = create_app()
     uvicorn.run(
-        "dorkscout.main:create_app",
-        factory=True,
+        app,
         host="127.0.0.1",
         port=8000,
         log_level="info",
