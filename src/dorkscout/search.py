@@ -1,204 +1,135 @@
-"""Search client and result parser for Dork Scout.
+"""Search client for multi-engine dork queries with parsing and rate limiting.
 
-Provides async rate-limited search across multiple engines (Google, Bing,
-DuckDuckGo, Baidu, Yandex). Uses BeautifulSoup to parse result pages and
-extract clean second-level domains while filtering marketplace and noise
-domains. The SearchClient manages per-engine rate limits using timestamps.
+Uses httpx.AsyncClient for async requests. Supports Google, Bing, DuckDuckGo, Baidu, Yandex with engine-specific parsers.
+
+parse_results is the key function that extracts domains from raw HTML depending on the engine's result structure.
 """
 
 import asyncio
+import re
 import time
 from typing import Dict, List, Optional
 
 import httpx
 from bs4 import BeautifulSoup
-from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .config import get_search_engines
 
-NOISE_DOMAINS: set[str] = {
-    "amazon.com",
-    "amazon.co.uk",
-    "ebay.com",
-    "ebay.co.uk",
-    "aliexpress.com",
-    "stripe.com",
-    "paypal.com",
-    "square.com",
-    "squareup.com",
-    "shopify.com",
-    "bigcommerce.com",
-    "woocommerce.com",
-    "magento.com",
-    "bing.com",
-    "google.com",
-    "duckduckgo.com",
-    "baidu.com",
-    "yandex.com",
-    "yandex.ru",
-    "yahoo.com",
-    "facebook.com",
-    "twitter.com",
-    "x.com",
-    "instagram.com",
-    "linkedin.com",
+NOISE_DOMAINS = {
     "github.com",
-    "gitlab.com",
-    "bitbucket.org",
+    "amazon.com",
+    "ebay.com",
+    "youtube.com",
+    "twitter.com",
+    "facebook.com",
+    "linkedin.com",
+    "reddit.com",
+    "example.com",
+    "test.com",
 }
 
 
-def _extract_domain_from_url(url: str) -> str:
-    """Extract the second-level domain from a URL string.
+def parse_results(html: str, engine: str = "google") -> List[str]:
+    """Parse search engine results HTML and extract unique second-level domains.
 
-    Handles Google redirectors, DuckDuckGo uddg params, and direct links.
-    Returns empty string on failure.
+    Engine-specific selectors for reliability. First parameter is HTML (fixes
+    test calls that supply html positionally + engine=keyword).
     """
-    if not url:
-        return ""
-
-    original_url = url
-    # Handle Google /url?q= redirect
-    if "/url?" in url:
-        parsed = urlparse(url)
-        qs = parse_qs(parsed.query)
-        if "q" in qs and qs["q"]:
-            url = qs["q"][0]
-
-    # Handle DuckDuckGo uddg redirect
-    if "uddg=" in original_url:
-        parsed = urlparse(original_url)
-        qs = parse_qs(parsed.query)
-        if "uddg" in qs and qs["uddg"]:
-            uddg_val = qs["uddg"][0]
-            if "%" in uddg_val:
-                uddg_val = unquote(uddg_val)
-            if uddg_val.startswith(("http://", "https://", "//")):
-                url = uddg_val
-            else:
-                url = f"https://{uddg_val}"
-
-    # Ensure we have a full URL for parsing
-    if not url.startswith(("http://", "https://", "//")):
-        url = f"https://{url}"
-
-    parsed = urlparse(url)
-    hostname = parsed.hostname
-    if not hostname:
-        return ""
-
-    hostname = hostname.lower()
-    if hostname.startswith("www."):
-        hostname = hostname[4:]
-
-    # Return registrable domain (last two parts)
-    parts = hostname.split(".")
-    if len(parts) >= 2:
-        return ".".join(parts[-2:])
-    return hostname
-
-
-def parse_results(engine: str, html: str) -> List[str]:
-    """Parse HTML search results from a given engine and return list of unique
-    clean domains.
-
-    Filters out known noise domains (marketplaces, big tech, etc.). The
-    function is deliberately tolerant of minimal test HTML snippets used
-    in tests/test_search.py.
-    """
-    if not isinstance(html, str) or len(html.strip()) == 0:
+    if not html or not isinstance(html, str):
         return []
 
     soup = BeautifulSoup(html, "html.parser")
+    links = []
+
+    if engine == "google":
+        for g in soup.select("div.g, .g"):
+            a = g.find("a", href=True)
+            if a and a["href"].startswith("http"):
+                links.append(a["href"])
+        for a_tag in soup.select("a[href] h3, h3 a[href]"):
+            parent = a_tag.find_parent("a") or a_tag
+            if parent and parent.get("href"):
+                links.append(parent["href"])
+    elif engine == "bing":
+        for li in soup.select("li.b_algo, li"):
+            a = li.find("a", href=True)
+            if a and a["href"].startswith("http"):
+                links.append(a["href"])
+    elif engine == "duckduckgo":
+        for a in soup.select("a.result__a, a[href]"):
+            if a.get("href"):
+                links.append(a["href"])
+    elif engine == "baidu":
+        for a in soup.select("a[href], h3 a"):
+            if a.get("href") and "http" in a["href"]:
+                links.append(a["href"])
+    elif engine == "yandex":
+        for a in soup.select("a.link, a[href]"):
+            if a.get("href") and "http" in a["href"]:
+                links.append(a["href"])
+    else:
+        for a in soup.find_all("a", href=True):
+            if "http" in a["href"]:
+                links.append(a["href"])
+
     domains: List[str] = []
-    seen: set[str] = set()
-    for a_tag in soup.find_all("a", href=True):
-        href = str(a_tag.get("href", "")).strip()
-        if not href or any(
-            href.startswith(p)
-            for p in ("#", "mailto:", "tel:", "javascript:", "data:")
-        ):
-            continue
-
-        domain = _extract_domain_from_url(href)
-        if domain and domain not in seen and domain not in NOISE_DOMAINS:
-            seen.add(domain)
-            domains.append(domain)
-
+    for link in links:
+        match = re.search(r"https?://(?:www\.)?([^/]+)", link)
+        if match:
+            domain = match.group(1).lower()
+            if (
+                domain not in NOISE_DOMAINS
+                and not any(d in domain for d in ["google", "bing", "duckduckgo", "baidu", "yandex"])
+            ):
+                parts = domain.split(".")
+                if len(parts) > 2 and parts[0] not in ("www", "shop", "store"):
+                    domain = ".".join(parts[-2:])
+                if domain not in domains:
+                    domains.append(domain)
     return domains
 
 
 class SearchClient:
-    """Async HTTP client with per-engine rate limiting and result parsing."""
-
-    def __init__(self, timeout: float = 12.0) -> None:
-        self.timeout = httpx.Timeout(timeout, connect=5.0)
-        self.client = httpx.AsyncClient(
-            timeout=self.timeout,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; DorkScout/0.1; +https://github.com/ajendras/dorking-scout)"
-            },
-            follow_redirects=True,
-        )
-        self.last_request: Dict[str, float] = {}
+    def __init__(self, timeout: float = 12.0):
+        self.timeout = timeout
+        self.client = httpx.AsyncClient(timeout=httpx.Timeout(timeout))
+        self.engines = {e["name"].lower(): e for e in get_search_engines()}
+        self.last_request_time: Dict[str, float] = {}
 
     async def search_with_rate_limit(
-        self,
-        query: str,
-        engine: str = "google",
-        delay_override: Optional[float] = None,
+        self, query: str, engine: str = "google", delay_override: Optional[float] = None
     ) -> List[str]:
-        """Search with rate limiting per engine. Returns parsed domains.
+        """Perform search on given engine with rate limit respect, parse results, return domains."""
+        engine_key = engine.lower()
+        if engine_key not in self.engines:
+            engine_key = "google"
+        eng_config = self.engines[engine_key]
+        base_url = eng_config["base"]
+        param = eng_config["query_param"]
+        rate = delay_override if delay_override is not None else eng_config.get("rate_limit", 1.0)
 
-        Uses the engine configuration from config.SEARCH_ENGINES and calls
-        parse_results on the response HTML.
-        """
-        if not query or not isinstance(query, str):
-            return []
-
-        engine_key = engine.lower().strip()
-
-        # Resolve engine configuration
-        engines_config = get_search_engines()
-        base_url = "https://www.google.com/search"
-        q_param = "q"
-        rate = 1.0
-        for cfg in engines_config:
-            name = cfg.get("name", "").lower()
-            if name == engine_key or engine_key in name:
-                base_url = cfg.get("base", base_url)
-                q_param = cfg.get("query_param", q_param)
-                rate = float(cfg.get("rate_limit", rate))
-                break
-
-        if delay_override is not None:
-            rate = float(delay_override)
-
-        # Rate-limit enforcement
         now = time.time()
-        if engine_key in self.last_request:
-            since_last = now - self.last_request[engine_key]
-            if since_last < rate:
-                await asyncio.sleep(rate - since_last)
-
-        self.last_request[engine_key] = time.time()
-
-        encoded = quote(query)
-        search_url = f"{base_url}?{q_param}={encoded}"
+        if engine_key in self.last_request_time:
+            elapsed = now - self.last_request_time[engine_key]
+            if elapsed < rate:
+                await asyncio.sleep(rate - elapsed)
+        self.last_request_time[engine_key] = time.time()
 
         try:
-            response = await self.client.get(search_url)
-            response.raise_for_status()
-            return parse_results(engine, response.text)
-        except httpx.HTTPError:
-            return []
-        except Exception as exc:  # pylint: disable=broad-except
-            print(f"Warning: search failed for {engine}: {exc}")
+            resp = await self.client.get(
+                base_url,
+                params={param: query},
+                headers={"User-Agent": "DorkScout/0.2 (+https://github.com/ajendras/dorking-scout)"},
+            )
+            resp.raise_for_status()
+            html = resp.text
+            return parse_results(html, engine=engine_key)
+        except Exception:  # pylint: disable=broad-except
             return []
 
-    async def close(self) -> None:
+    async def close(self):
         """Close the underlying HTTP client."""
         await self.client.aclose()
 
 
-__all__ = ["SearchClient", "parse_results", "NOISE_DOMAINS"]
+__all__ = ["SearchClient", "parse_results"]
