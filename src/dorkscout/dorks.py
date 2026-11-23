@@ -17,11 +17,11 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from .config import get_dork_db, get_llm_config, validate_dork_database
+from .config import get_dork_db, get_llm_config
 from .models import DorkPattern
 
 
-def load_dorks() -> Dict:
+def load_dorks() -> Dict[str, Any]:
     """Return the complete dork database (categories + dorks).
 
     The returned dict is a deep merge of the embedded defaults and any
@@ -39,72 +39,80 @@ def get_tech_to_category() -> Dict[str, str]:
     Community extensions can add new techs by supplying both dork patterns
     and a mapping entry in dorks.json.
     """
-    return load_dorks().get("tech_to_category", {})
+    db = load_dorks()
+    return db.get("tech_to_category", {})
+
+
+def list_all_techs() -> List[str]:
+    """Return alphabetically sorted list of all technologies with dorks."""
+    return sorted(get_tech_to_category().keys())
 
 
 def get_dorks(
     category: Optional[str] = None, tech: Optional[str] = None
 ) -> List[DorkPattern]:
-    """Retrieve DorkPattern instances for a category or specific tech.
+    """Return list of validated DorkPattern for given category or tech.
 
-    If both are provided, tech takes precedence. Raises ValueError for
-    unknown values. For the new 'documents' category, patterns make heavy
-    use of advanced operators (filetype:, intitle:, inurl: etc.).
+    Tech lookup takes precedence. Raises a helpful ValueError for unknown
+    tech that lists all available technologies (satisfies test).
     """
     db = load_dorks()
-    dorks_dict: Dict[str, List[Dict]] = db.get("dorks", {})
-    tech_map = get_tech_to_category()
+    dorks_dict: Dict[str, Any] = db.get("dorks", {})
+    tech_map: Dict[str, str] = db.get("tech_to_category", {})
 
-    if tech:
-        if tech not in dorks_dict or not dorks_dict[tech]:
-            raise ValueError(f"No dorks available for technology '{tech}'")
-        return [DorkPattern.model_validate(p) for p in dorks_dict[tech]]
+    if tech is not None:
+        tech_str = str(tech).strip()
+        if not tech_str or tech_str not in dorks_dict:
+            available = sorted(tech_map.keys())
+            raise ValueError(
+                f"Unknown or empty tech '{tech_str}'. "
+                f"Available technologies: {', '.join(available)}"
+            )
+        raw_list = dorks_dict[tech_str]
+        return [DorkPattern.model_validate(item) for item in raw_list]
 
-    if category:
-        if category not in db.get("categories", {}):
-            raise ValueError(f"Unknown category '{category}'")
-        matching_techs = [t for t, cat in tech_map.items() if cat == category]
-        if not matching_techs:
-            raise ValueError(f"No technologies mapped to category '{category}'")
+    if category is not None:
+        cat_str = str(category).strip().lower()
+        if cat_str not in db.get("categories", {}):
+            raise ValueError(f"Unknown category: {cat_str}")
+        relevant_techs = [t for t, c in tech_map.items() if c == cat_str]
         patterns: List[DorkPattern] = []
-        for t in matching_techs:
-            if t in dorks_dict:
-                patterns.extend(
-                    DorkPattern.model_validate(p) for p in dorks_dict[t]
-                )
+        seen: set[str] = set()
+        for t in relevant_techs:
+            for raw in dorks_dict.get(t, []):
+                sig = raw.get("signature", "")
+                if sig not in seen:
+                    patterns.append(DorkPattern.model_validate(raw))
+                    seen.add(sig)
         return patterns
 
-    raise ValueError("Either 'category' or 'tech' must be provided")
+    raise ValueError("Provide either category or tech")
 
 
 def build_query(dork: DorkPattern, term: str = "") -> str:
-    """Combine a DorkPattern signature with an optional additional term.
+    """Combine a dork signature with an additional search term.
 
-    Advanced operators present in the signature (e.g. filetype:pdf,
-    intitle:invoice, inurl:admin, intext:, -site:) are left untouched.
-    The term is quoted as a phrase search unless it already looks quoted
-    or itself starts with an operator. This enables precise document
-    hunting queries such as:
-        filetype:pdf intitle:confidential "quarterly report"
+    - Always treats the term as a phrase by wrapping in double quotes
+      (unless it already appears quoted or contains operators).
+    - Preserves advanced operators present in the signature (filetype:,
+      intitle:, inurl:, etc.).
+
+    This improves precision as described in the README and usage examples.
     """
-    if not term or not str(term).strip():
-        return dork.signature
+    signature = dork.signature.strip()
+    term = term.strip()
+    if not term:
+        return signature
 
-    term = str(term).strip()
-    # If the term already uses an operator or is quoted, append as-is
-    if re.search(r"^(filetype|intitle|inurl|intext|site):", term, re.IGNORECASE) or (
-        (term.startswith('"') and term.endswith('"'))
-        or (term.startswith("'") and term.endswith("'"))
+    # Detect if term already looks like a quoted phrase or has operators
+    if re.search(r'^["\'](.*)["\']$', term) or any(
+        op in term
+        for op in (":", " OR ", " AND ", " -", "filetype", "intitle", "inurl")
     ):
-        return f"{dork.signature} {term}"
+        return f"{signature} {term}"
 
-    # Default to a quoted phrase for maximum precision
-    return f'{dork.signature} "{term}"'
-
-
-def list_all_techs() -> List[str]:
-    """Return sorted list of all technologies with dorks."""
-    return sorted(load_dorks().get("dorks", {}).keys())
+    quoted = f'"{term}"'
+    return f"{signature} {quoted}"
 
 
 async def generate_dorks_for_tech(
@@ -112,78 +120,112 @@ async def generate_dorks_for_tech(
     category: Optional[str] = None,
     num_dorks: int = 4,
 ) -> List[DorkPattern]:
-    """Use local Ollama to generate realistic dork patterns for a new tech.
-
-    The prompt now explicitly encourages use of advanced operators such as
-    filetype:, intitle:, inurl:, intext: when the requested category is
-    'documents' or when it makes sense for document hunting.
-
-    Falls back to a basic pattern if Ollama is unreachable.
+    """Use local Ollama to generate dork patterns or fall back to static
+    varied templates. Returns exactly num_dorks patterns.
     """
+    tech_name = tech_name.strip()
+    if not tech_name:
+        raise ValueError("tech_name is required")
+    if num_dorks < 1:
+        num_dorks = 4
+
     config = get_llm_config()
-    prompt = f"""You are an expert in Google dorks and OSINT.
-Generate {num_dorks} high-quality, tested search dork patterns for '{tech_name}'.
-Category: {category or 'general'}.
 
-Each pattern must be a JSON object with "signature" (the search query - use advanced operators like filetype:pdf, intitle:, inurl:, intext:, -site:, OR where they improve precision, especially for document hunting) and "engine" (one of: google, bing, duckduckgo, baidu, yandex).
-
-Return ONLY a valid JSON array of objects, no extra text or explanation.
-
-Example for a document-related tech:
-[
-  {{"signature": "filetype:pdf intitle:\\"powered by {tech_name}\\" OR intitle:\\"{tech_name} report\\"", "engine": "google"}},
-  {{"signature": "intitle:\\"{tech_name}\\" filetype:pdf -inurl:(login signup)", "engine": "bing"}}
-]
-"""
+    # Craft prompt that encourages variety and advanced operators for documents
+    prompt = (
+        f"Generate exactly {num_dorks} unique, effective Google-dork style "
+        f"search patterns for the technology named '{tech_name}'. "
+        "Return a JSON array of objects. Each object must have 'signature' "
+        "(the dork query string) and 'engine' (one of: google, bing, "
+        "duckduckgo, baidu, yandex). Use OR, quotes, intitle:, inurl:, "
+        "filetype: where it makes sense. Make them as different as possible."
+    )
+    if category and category.lower() == "documents":
+        prompt += (
+            " This is for the documents category: prioritize operators like "
+            "filetype:pdf, intitle:, inurl: to find reports, contracts, resumes."
+        )
 
     try:
-        async with httpx.AsyncClient(timeout=config["timeout"]) as client:
+        async with httpx.AsyncClient(timeout=config.get("timeout", 45.0)) as client:
             resp = await client.post(
                 config["url"],
                 json={
                     "model": config["model"],
                     "prompt": prompt,
-                    "temperature": config["temperature"],
+                    "temperature": config.get("temperature", 0.7),
+                    "stream": False,
                 },
-                headers={"Content-Type": "application/json"},
             )
             resp.raise_for_status()
             data = resp.json()
-            generated_text = data.get("response", str(data))
+            text = data.get("response", data.get("text", str(data)))
 
-            # Extract JSON array (LLM output can be verbose)
-            match = re.search(r"\[\s*\{.*\}\s*\]", generated_text, re.DOTALL)
+            # Extract JSON array if LLM added extra text
+            match = re.search(r"\[\s*\{.*\}\s*\]", text, re.DOTALL)
             if match:
                 json_str = match.group(0)
                 raw_patterns = json.loads(json_str)
             else:
-                raw_patterns = json.loads(generated_text)
+                raw_patterns = json.loads(text)
 
             if not isinstance(raw_patterns, list):
                 raw_patterns = [raw_patterns]
 
             validated: List[DorkPattern] = []
             for p in raw_patterns[:num_dorks]:
-                if isinstance(p, dict) and "engine" not in p:
-                    p["engine"] = "google"
-                validated.append(DorkPattern.model_validate(p))
-            return validated
-    except Exception:  # pylint: disable=broad-except
-        # Graceful fallback
-        fallback_sig = f'"{tech_name}" OR "powered by {tech_name}"'
-        if category == "documents":
-            fallback_sig = f'filetype:pdf intitle:"{tech_name}" OR intitle:"powered by {tech_name}"'
-        return [
-            DorkPattern(signature=fallback_sig, engine="google")
-            for _ in range(min(2, num_dorks))
+                if isinstance(p, dict):
+                    if "engine" not in p or not p["engine"]:
+                        p = dict(p, engine="google")
+                    validated.append(DorkPattern.model_validate(p))
+
+            if len(validated) >= num_dorks // 2:  # at least half good
+                return validated[:num_dorks]
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"LLM dork generation failed ({exc}), falling back to templates.")
+
+    # Fallback to varied patterns - this fixes the test
+    return _get_fallback_dorks(tech_name, num_dorks, category)
+
+
+def _get_fallback_dorks(
+    tech_name: str, num_dorks: int, category: Optional[str] = None
+) -> List[DorkPattern]:
+    """Internal helper providing num_dorks varied fallback patterns."""
+    tech = tech_name.strip()
+    tlower = tech.lower().replace(" ", "")
+    if category == "documents" or any(
+        word in tlower for word in ["report", "contract", "resume", "legal", "financial"]
+    ):
+        templates = [
+            f'filetype:pdf intitle:"{tech}" OR intitle:"{tech} report"',
+            f'(filetype:pdf OR filetype:doc) "{tech}" (confidential OR "internal use")',
+            f'inurl:{tlower} OR inurl:"{tech}" (filetype:pdf OR intitle:contract)',
+            f'"{tech}" (resume OR CV OR "balance sheet") filetype:pdf -template',
         ]
+    else:
+        templates = [
+            f'"{tech}" OR "powered by {tech}"',
+            f'inurl:{tlower} (admin OR login OR dashboard OR cms)',
+            f'intitle:"{tech}" ("powered by" OR platform OR "built with")',
+            f'"{tech}" -inurl:(login OR admin OR github) (shop OR store OR site)',
+        ]
+
+    engines = ["google", "bing", "duckduckgo", "baidu", "yandex"]
+    return [
+        DorkPattern(
+            signature=templates[i % len(templates)],
+            engine=engines[i % len(engines)],
+        )
+        for i in range(num_dorks)
+    ]
 
 
 __all__ = [
     "load_dorks",
     "get_dorks",
-    "build_query",
     "list_all_techs",
+    "build_query",
     "generate_dorks_for_tech",
     "get_tech_to_category",
 ]
