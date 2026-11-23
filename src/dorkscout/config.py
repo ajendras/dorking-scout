@@ -51,6 +51,13 @@ DEFAULT_DORK_DB: Dict[str, Any] = {
             "color": "#c56a3b",
             "description": "Explore vertical-specific online stores (books, shoes, gifts).",
         },
+        "documents": {
+            "id": "documents",
+            "name": "Document Hunting",
+            "icon": "📄",
+            "color": "#c56a3b",
+            "description": "Surface PDFs, spreadsheets and other files using advanced operators (filetype:, intitle:, inurl:).",
+        },
     },
     "dorks": {
         "Stripe": [
@@ -117,6 +124,36 @@ DEFAULT_DORK_DB: Dict[str, Any] = {
                 "engine": "google",
             },
         ],
+        "Financial Reports": [
+            {
+                "signature": 'filetype:pdf (financial OR "annual report" OR "balance sheet" OR "quarterly report") -template -example',
+                "engine": "google",
+            },
+            {
+                "signature": 'intitle:"financial report" OR intitle:"balance sheet" filetype:pdf',
+                "engine": "bing",
+            },
+        ],
+        "Legal Contracts": [
+            {
+                "signature": '(filetype:pdf OR filetype:doc OR filetype:docx) (contract OR agreement OR NDA OR "confidential") ("internal only" OR "do not distribute")',
+                "engine": "google",
+            },
+            {
+                "signature": 'intitle:contract OR intitle:agreement filetype:pdf inurl:docs',
+                "engine": "duckduckgo",
+            },
+        ],
+        "Resumes": [
+            {
+                "signature": '(resume OR CV OR "curriculum vitae") (filetype:pdf OR filetype:doc) ("contact me" OR email OR phone OR experience)',
+                "engine": "google",
+            },
+            {
+                "signature": 'intitle:resume filetype:pdf -inurl:(login signup)',
+                "engine": "yandex",
+            },
+        ],
     },
     "tech_to_category": {
         "Stripe": "payment_gateways",
@@ -127,6 +164,9 @@ DEFAULT_DORK_DB: Dict[str, Any] = {
         "Books": "niches",
         "Shoes": "niches",
         "Gift Cards": "niches",
+        "Financial Reports": "documents",
+        "Legal Contracts": "documents",
+        "Resumes": "documents",
     },
 }
 

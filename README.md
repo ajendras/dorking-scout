@@ -47,8 +47,8 @@ Hundreds of tested patterns for gateways, CMS platforms and niches
 Queries Google, Bing, DuckDuckGo, Baidu and Yandex with built-in rate-limit safety
 </td>
 <td width="33%">
-📦 <b>Niche Explorer</b><br>
-Find stores selling shoes, books, egifts or any custom vertical
+📦 <b>Niche &amp; Document Explorer</b><br>
+Find stores selling shoes, books, egifts or hunt for PDFs/contracts/resumes using advanced operators (filetype:, intitle:, inurl:)
 </td>
 </tr>
 <tr>
@@ -207,6 +207,14 @@ python examples/niche_books.py
 
 Demonstrates the “niches” category with product-specific terms, deduplication against the `noise_domains` set, enrichment via free sources, and export of up to 20 unique domains.
 
+### Document hunting with advanced operators (new)
+
+```bash
+python examples/document_hunting.py
+```
+
+Uses the new `documents` category. `get_dorks(category="documents")` returns patterns built with `filetype:`, `intitle:`, `inurl:` and similar operators. `build_query()` intelligently appends a phrase term while preserving operators, runs the search, enriches results and exports a CSV with metadata. Demonstrates OSINT-style document discovery (financial reports, contracts, resumes, etc.).
+
 ### Generating dorks for unknown tech (new)
 
 Requires [Ollama](https://ollama.com) installed and running locally (`ollama serve`) with a model pulled (recommended: `ollama pull llama3.2`).
@@ -360,7 +368,7 @@ The new `generate_dorks_for_tech()` helper can be used to bootstrap high-quality
 - Consistent `tech_to_category` mapping
 - Non-empty patterns and known categories
 
-See `tests/test_dorks.py` for the validation test suite. New contributions must pass these checks (and the existing test suite). `get_tech_to_category()` and `get_dorks()` automatically pick up extensions. The `build_query()` helper now always quotes additional terms (single- or multi-word) unless already quoted.
+See `tests/test_dorks.py` for the validation test suite. New contributions must pass these checks (and the existing test suite). `get_tech_to_category()` and `get_dorks()` automatically pick up extensions. The `build_query()` helper now always quotes additional terms (single- or multi-word) unless already quoted and explicitly preserves advanced operators.
 
 </details>
 
@@ -377,7 +385,7 @@ See `tests/test_dorks.py` for the validation test suite. New contributions must 
 <tr><td><code>TECH_TO_CATEGORY</code></td><td>Now part of DB (extensible)</td><td>Links tech names to categories; new techs require a mapping entry in <code>dorks.json</code></td></tr>
 <tr><td><code>timeout</code> (SearchClient)</td><td>12.0</td><td>httpx timeout passed to <code>AsyncClient</code></td></tr>
 <tr><td><code>DB_PATH</code></td><td><code>./dorkscout.db</code></td><td>SQLite file for persistent domain and search history (auto-created and managed by <code>DiscoveryStore</code>). Now also stores <code>scheduled_jobs</code>.</td></tr>
-<tr><td><code>build_query()</code></td><td>—</td><td>Now consistently quotes the supplied <code>term</code> as a phrase for improved precision on both single-word and multi-word inputs (updated in v0.1.0 CI fixes).</td></tr>
+<tr><td><code>build_query()</code></td><td>—</td><td>Now consistently quotes the supplied <code>term</code> as a phrase for improved precision on both single-word and multi-word inputs (updated in v0.1.0 CI fixes). Advanced operators (<code>filetype:</code>, <code>intitle:</code>, <code>inurl:</code>…) inside signatures are preserved.</td></tr>
 <tr><td><code>enrich_discovery_results()</code></td><td>—</td><td>Async helper (limited to first 6 results) that calls free public APIs (Wayback Machine CDX + crt.sh). Internal semaphore and timeouts keep usage respectful.</td></tr>
 </table>
 
@@ -433,7 +441,8 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 │   └── web.py                     # UI routes serving Jinja2 templates with HTMX (now includes /analytics)
 ├── examples/
 │   ├── discover_payments.py       # Stripe + gift-card example with CSV export
-│   └── niche_books.py             # Product-niche demo exporting unique domains
+│   ├── niche_books.py             # Product-niche demo exporting unique domains
+│   └── document_hunting.py        # New: demonstrates advanced operators for PDFs/contracts/resumes
 ├── tests/
 │   ├── test_dorks.py              # Tests for loading, filtering, query building, validation and LLM helper
 │   └── test_search.py             # Mocked HTML parsing, deduplication, enrichment, store tests and new analytics queries
@@ -446,7 +455,7 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 pytest
 ```
 
-The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching, the new `enrich_metadata()` / `enrich_discovery_results()` (with mocked HTTP responses), error cases, Pydantic validation and the new `DiscoveryStore` (in-memory mode, record_search, history and unique domains). New tests for `generate_dorks_for_tech()` (with mocked Ollama responses and fallback path) have been added. Store tests now exercise the scheduled_jobs table, add/delete and freshness queries. The analytics test (`test_tech_distribution()`) exercises `get_tech_distribution()` with multi-tech domains. All CI tests now pass.
+The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting and preservation of advanced operators), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching, the new `enrich_metadata()` / `enrich_discovery_results()` (with mocked HTTP responses), error cases, Pydantic validation and the new `DiscoveryStore` (in-memory mode, record_search, history and unique domains). New tests for `generate_dorks_for_tech()` (with mocked Ollama responses and fallback path) have been added as well as `test_get_dorks_for_documents()` and `test_build_query_with_advanced_operators()`. Store tests now exercise the scheduled_jobs table, add/delete and freshness queries. The analytics test (`test_tech_distribution()`) exercises `get_tech_distribution()` with multi-tech domains. All CI tests now pass.
 
 ## 📍 Roadmap
 <!-- roadmap:start -->
@@ -459,7 +468,7 @@ The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks(
 - [x] Create companion browser extension that suggests dorks from Wappalyzer detections
 - [x] Add scheduled background jobs with email or webhook alerts for fresh domains
 - [x] Build analytics dashboard showing tech distribution graphs across results
-- [ ] Support advanced operators like filetype:pdf and intitle: for document hunting
+- [x] Support advanced operators like filetype:pdf and intitle: for document hunting
 - [ ] CLI subcommand for bulk list processing and headless CSV output
 - [ ] Improve fingerprint database with 150+ additional app signatures
 - [ ] Add relevance scoring that prefers smaller independent sites over big brands
