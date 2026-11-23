@@ -105,6 +105,12 @@ Companion Chrome extension that detects technologies on the current page (Wappal
 </tr>
 <tr>
 <td colspan="3">
+🖥️ <b>CLI Bulk Mode</b><br>
+New <code>dork-scout bulk</code> subcommand for processing lists of terms from a file (or repeated --term), running multi-engine searches, deduplication, enrichment and direct CSV export. Perfect for automation, batch jobs and headless OSINT.
+</td>
+</tr>
+<tr>
+<td colspan="3">
 ⏰ <b>Scheduled Alerts</b><br>
 Persistent background jobs (APScheduler) that run curated searches on an interval, detect brand-new domains and deliver rich alerts via email (smtplib) or webhook (JSON payload)
 </td>
@@ -133,10 +139,12 @@ cd dorking-scout
 pip install -e .
 ```
 
-Start the server:
+Start the server (or use the new CLI):
 
 ```bash
 dork-scout
+# or
+dork-scout serve --host 0.0.0.0 --port 8000
 ```
 
 The app will be available at http://127.0.0.1:8000 with the warm organic UI (soft paper texture, serif headings, terracotta/olive accents). The `AlertScheduler` starts automatically on boot.
@@ -301,6 +309,30 @@ curl http://127.0.0.1:8000/api/analytics
 
 Returns `total_domains`, `tech_distribution`, `top_techs` and a timestamp. This powers both the UI and any external dashboards.
 
+### CLI bulk processing (new)
+
+The new `bulk` subcommand enables headless operation for large batches without starting the web server. It accepts a technology or category, one or more terms (via `--term` or a file), runs the full pipeline (search, deduplication via `NOISE_DOMAINS`, detection, enrichment) and writes a rich CSV.
+
+```bash
+# Single tech + multiple terms
+dork-scout bulk --tech Stripe --term coffee --term "gift cards" --output stripe.csv --limit 60
+
+# Bulk from file (one term per line, # comments supported)
+cat > terms.txt << EOF
+coffee shop
+book store
+vintage leather
+# skip this line
+EOF
+
+dork-scout bulk --tech Shopify --terms-file terms.txt --output shops.csv
+
+# By broad category
+dork-scout bulk --category documents --term "financial report" --output reports.csv
+```
+
+The generated CSV contains all `DiscoveryResult` fields (including `domain_age_days`, `ssl_issuer`, `ssl_valid_to` etc.) with semicolon-separated tech lists. Output is deduplicated across all queries. Perfect for automation, scripts or CI.
+
 ### API-driven search
 
 ```bash
@@ -387,6 +419,7 @@ See `tests/test_dorks.py` for the validation test suite. New contributions must 
 <tr><td><code>DB_PATH</code></td><td><code>./dorkscout.db</code></td><td>SQLite file for persistent domain and search history (auto-created and managed by <code>DiscoveryStore</code>). Now also stores <code>scheduled_jobs</code>.</td></tr>
 <tr><td><code>build_query()</code></td><td>—</td><td>Now consistently quotes the supplied <code>term</code> as a phrase for improved precision on both single-word and multi-word inputs (updated in v0.1.0 CI fixes). Advanced operators (<code>filetype:</code>, <code>intitle:</code>, <code>inurl:</code>…) inside signatures are preserved.</td></tr>
 <tr><td><code>enrich_discovery_results()</code></td><td>—</td><td>Async helper (limited to first 6 results) that calls free public APIs (Wayback Machine CDX + crt.sh). Internal semaphore and timeouts keep usage respectful.</td></tr>
+<tr><td><code>bulk</code> CLI</td><td>—</td><td>New subcommand options: <code>--tech</code>, <code>--category</code>, <code>--term</code> (repeatable), <code>--terms-file</code>, <code>--output</code>, <code>--limit</code>. Uses same rate limits and <code>NOISE_DOMAINS</code> as web paths.</td></tr>
 </table>
 
 ## 🧩 Architecture
@@ -413,9 +446,12 @@ flowchart TD
     EXT --> POPUP[Popup UI<br/>shows detected tech + one-click Google dorks]
     POPUP --> API
     Analytics[Analytics UI + Chart.js] --> API
+    CLI[CLI (main.py)<br/>bulk subcommand] --> Search
+    CLI --> Detector
+    CLI --> Models
 ```
 
-The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the curated database, `search.py` handles async multi-engine queries with noise filtering, `detector.py` adds technology fingerprints plus domain/SSL enrichment from free sources, `store.py` provides persistent history (now including scheduled jobs and tech-distribution aggregation), `scheduler.py` runs background monitoring with APScheduler, and FastAPI routers (`api.py`, `web.py`) serve both the organic UI and JSON endpoints. All heavy lifting runs in background workers so the HTMX interface stays responsive. The new local-LLM helper lives in `dorks.py` and talks directly to Ollama's REST API. The companion browser extension brings the same detection logic to the browser and surfaces curated dorks instantly. Email alerts use the Python standard library; webhooks are sent asynchronously. The new analytics dashboard pulls live aggregates from the store and renders them with Chart.js.
+The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the curated database, `search.py` handles async multi-engine queries with noise filtering, `detector.py` adds technology fingerprints plus domain/SSL enrichment from free sources, `store.py` provides persistent history (now including scheduled jobs and tech-distribution aggregation), `scheduler.py` runs background monitoring with APScheduler, and FastAPI routers (`api.py`, `web.py`) serve both the organic UI and JSON endpoints. All heavy lifting runs in background workers so the HTMX interface stays responsive. The new local-LLM helper lives in `dorks.py` and talks directly to Ollama's REST API. The companion browser extension brings the same detection logic to the browser and surfaces curated dorks instantly. Email alerts use the Python standard library; webhooks are sent asynchronously. The new analytics dashboard pulls live aggregates from the store and renders them with Chart.js. The new CLI bulk subcommand (in `main.py`) reuses `SearchClient`, `bulk_process()` and `_write_csv()` from `search.py` for consistent headless CSV output.
 
 ## 📁 Project structure
 
@@ -429,11 +465,11 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 │   ├── popup.js
 │   └── content.js
 ├── src/dorkscout/
-│   ├── main.py                    # create_app() FastAPI factory + run() uvicorn entrypoint (now starts AlertScheduler)
+│   ├── main.py                    # create_app() FastAPI factory + run() uvicorn entrypoint (now starts AlertScheduler) + new CLI parser + bulk subcommand
 │   ├── config.py                  # DEFAULT_DORK_DB, SEARCH_ENGINES, OLLAMA_CONFIG, ALERT_CONFIG, DB_PATH, load functions
 │   ├── models.py                  # Category, DorkPattern, DiscoveryResult, SearchHistory, StoredDomain, ScheduledJob, AlertConfig, AnalyticsSummary
 │   ├── dorks.py                   # load_dorks, get_dorks, build_query, list_all_techs + generate_dorks_for_tech
-│   ├── search.py                  # SearchClient (async Google/Bing/DDG/Baidu/Yandex) + parse_results
+│   ├── search.py                  # SearchClient (async Google/Bing/DDG/Baidu/Yandex) + parse_results + new bulk_process() + _write_csv()
 │   ├── detector.py                # detect_technologies + TECH_SIGNATURES + async enrichment
 │   ├── store.py                   # Persistent SQLite layer (DiscoveryStore) — now includes scheduled_jobs + get_tech_distribution()
 │   ├── scheduler.py               # AlertScheduler, APScheduler integration, freshness detection + email/webhook delivery (new)
@@ -445,7 +481,7 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 │   └── document_hunting.py        # New: demonstrates advanced operators for PDFs/contracts/resumes
 ├── tests/
 │   ├── test_dorks.py              # Tests for loading, filtering, query building, validation and LLM helper
-│   └── test_search.py             # Mocked HTML parsing, deduplication, enrichment, store tests and new analytics queries
+│   └── test_search.py             # Mocked HTML parsing, deduplication, enrichment, store tests and new analytics queries + tests for bulk_process(), is_noise_domain(), CSV output
 └── templates/index.html           # Earthy UI with blob cards, Tailwind + HTMX (now includes analytics tab with Chart.js)
 ```
 
@@ -455,7 +491,7 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 pytest
 ```
 
-The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting and preservation of advanced operators), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching, the new `enrich_metadata()` / `enrich_discovery_results()` (with mocked HTTP responses), error cases, Pydantic validation and the new `DiscoveryStore` (in-memory mode, record_search, history and unique domains). New tests for `generate_dorks_for_tech()` (with mocked Ollama responses and fallback path) have been added as well as `test_get_dorks_for_documents()` and `test_build_query_with_advanced_operators()`. Store tests now exercise the scheduled_jobs table, add/delete and freshness queries. The analytics test (`test_tech_distribution()`) exercises `get_tech_distribution()` with multi-tech domains. All CI tests now pass.
+The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting and preservation of advanced operators), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching, the new `enrich_metadata()` / `enrich_discovery_results()` (with mocked HTTP responses), error cases, Pydantic validation and the new `DiscoveryStore` (in-memory mode, record_search, history and unique domains). New tests for `generate_dorks_for_tech()` (with mocked Ollama responses and fallback path) have been added as well as `test_get_dorks_for_documents()` and `test_build_query_with_advanced_operators()`. Store tests now exercise the scheduled_jobs table, add/delete and freshness queries. The analytics test (`test_tech_distribution()`) exercises `get_tech_distribution()` with multi-tech domains. New tests cover `bulk_process()`, `is_noise_domain()`, CSV writing and mocked multi-term execution. All CI tests now pass.
 
 ## 📍 Roadmap
 <!-- roadmap:start -->
@@ -469,7 +505,7 @@ The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks(
 - [x] Add scheduled background jobs with email or webhook alerts for fresh domains
 - [x] Build analytics dashboard showing tech distribution graphs across results
 - [x] Support advanced operators like filetype:pdf and intitle: for document hunting
-- [ ] CLI subcommand for bulk list processing and headless CSV output
+- [x] CLI subcommand for bulk list processing and headless CSV output
 - [ ] Improve fingerprint database with 150+ additional app signatures
 - [ ] Add relevance scoring that prefers smaller independent sites over big brands
 
