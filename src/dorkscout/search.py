@@ -1,123 +1,139 @@
-"""Search engine client and result parsing for Dork Scout.
+"""Search client and result parsing for multiple engines.
 
-Provides async SearchClient that can query multiple engines with rate limiting.
-parse_results uses BeautifulSoup to extract clean second-level domains from
-search result pages. Includes noise filtering to remove marketplaces and big tech.
-
-New: bulk_process() for the CLI subcommand that aggregates results across
-multiple terms, applies enrichment and writes a rich CSV.
+Provides async SearchClient with rate limiting per engine, parse_results that
+extracts clean second-level domains from different search engine HTML formats
+(Google redirect links, direct links, Baidu etc). Includes noise filtering,
+bulk processing helper and CSV export.
 """
 
 import asyncio
 import csv
 import re
-from datetime import datetime, timezone
+from datetime import datetime
+from io import StringIO
 from typing import Any, Dict, List, Optional
 
 import httpx
 from bs4 import BeautifulSoup
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, unquote_plus, urlparse
 
 from .config import get_search_engines
 from .detector import detect_technologies, enrich_discovery_results
 from .dorks import build_query, get_dorks
 from .models import DiscoveryResult
+from .store import DiscoveryStore
 
-# Noise domains to filter out (marketplaces, social, big tech)
-NOISE_DOMAINS = {
-    "amazon", "ebay", "aliexpress", "walmart", "etsy", "facebook", "instagram",
-    "twitter", "t.co", "linkedin", "github", "youtube", "pinterest", "reddit",
-    "tiktok", "google", "bing", "baidu", "yandex", "shopify.com", "stripe.com",
-    "paypal.com", "squareup.com",
+NOISE_DOMAINS: set[str] = {
+    "amazon.com",
+    "amazon.co.uk",
+    "ebay.com",
+    "ebay.co.uk",
+    "aliexpress.com",
+    "etsy.com",
+    "walmart.com",
+    "target.com",
+    "shopify.com",
+    "stripe.com",
+    "paypal.com",
+    "squareup.com",
+    "github.com",
+    "wordpress.com",
+    "blogspot.com",
+    "tumblr.com",
+    "medium.com",
+    "youtube.com",
+    "facebook.com",
+    "instagram.com",
+    "twitter.com",
+    "linkedin.com",
+    "pinterest.com",
 }
 
 
 def is_noise_domain(domain: str) -> bool:
-    """Return True if domain is in the noise list or contains noise keyword."""
+    """Return True if domain is a known noisy or irrelevant site."""
     if not domain:
         return True
-    d = domain.lower().strip()
-    for noise in NOISE_DOMAINS:
-        if noise in d:
-            return True
+    d = domain.lower()
+    if any(nd in d for nd in NOISE_DOMAINS):
+        return True
+    # avoid common hosting / cdn
+    if re.search(
+        r"\.(vercel\.app|herokuapp\.com|github\.io|weebly\.com|wixsite\.com)$", d
+    ):
+        return True
     return False
 
 
 def parse_results(html: str, engine: str = "google") -> List[str]:
-    """Extract unique second-level domains from search engine result HTML.
+    """Extract unique, non-noise second-level domains from search result HTML.
 
-    Uses engine-specific heuristics and falls back to general link parsing.
-    Filters noise domains.
+    Handles Google redirector (/url?q=), direct <a href>, Baidu style links
+    and other engines. Updated to catch the direct https://example.com links
+    that the previous version missed.
     """
-    if not html or len(html) < 100:
+    if not isinstance(html, str) or len(html.strip()) < 10:
         return []
 
     soup = BeautifulSoup(html, "html.parser")
-    links = soup.find_all("a", href=True)
-    extracted: List[str] = []
+    seen: set[str] = set()
+    engine_lower = engine.lower()
 
-    for a in links:
-        href = a.get("href", "")
-        if not href or "javascript:" in href or "mailto:" in href:
+    for a_tag in soup.find_all("a", href=True):
+        href = a_tag["href"].strip()
+        if not href or len(href) < 5 or href.startswith(("#", "javascript:", "tel:")):
             continue
 
-        # Engine specific
-        if engine == "google":
-            if "/url?q=" in href:
-                match = re.search(r"/url\?q=(https?://[^&]+)", href)
-                if match:
-                    url = match.group(1)
-                    parsed = urlparse(url)
-                    domain = parsed.netloc.lower()
-                    if domain:
-                        extracted.append(domain)
-        elif engine in ("bing", "duckduckgo"):
-            if href.startswith("http"):
+        # Resolve the actual target URL for engines that use redirectors
+        target = href
+        if engine_lower in ("google", "bing", "duckduckgo") and "/url" in href:
+            try:
                 parsed = urlparse(href)
-                if parsed.netloc and not parsed.netloc.endswith((".bing.com", ".duckduckgo.com")):
-                    extracted.append(parsed.netloc.lower())
-        elif engine == "baidu":
-            if "baidu.com" not in href and href.startswith("http"):
-                parsed = urlparse(href)
-                extracted.append(parsed.netloc.lower())
-        else:  # yandex etc
-            if href.startswith(("http://", "https://")):
-                parsed = urlparse(href)
-                if parsed.netloc:
-                    extracted.append(parsed.netloc.lower())
+                params = parse_qs(parsed.query)
+                for key in ("q", "url", "u"):
+                    if key in params and params[key]:
+                        target = unquote_plus(params[key][0])
+                        break
+            except Exception:
+                target = href
 
-    # Normalize to second-level domain
-    normalized: List[str] = []
-    for dom in extracted:
-        if not dom or is_noise_domain(dom):
+        # Extract domain
+        try:
+            if not any(target.startswith(p) for p in ("http://", "https://")):
+                if target.startswith("//"):
+                    target = "https:" + target
+                else:
+                    target = "https://" + target
+            parsed = urlparse(target)
+            if parsed.netloc:
+                domain = parsed.netloc.lower()
+                if domain.startswith("www."):
+                    domain = domain[4:]
+                if (
+                    domain
+                    and "." in domain
+                    and not is_noise_domain(domain)
+                    and domain not in seen
+                ):
+                    seen.add(domain)
+        except (ValueError, AttributeError):
             continue
-        # remove www. and take last two parts
-        dom = dom.replace("www.", "")
-        parts = dom.split(".")
-        if len(parts) >= 2:
-            sld = ".".join(parts[-2:])
-            if sld not in normalized:
-                normalized.append(sld)
 
-    return normalized
+    return sorted(seen)
 
 
 class SearchClient:
-    """Async client for multi-engine searching with built-in rate limits."""
+    """Async HTTP client for rate-limited searches across multiple engines."""
 
-    def __init__(self, timeout: float = 10.0):
-        self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout),
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (compatible; DorkScout/0.2; "
-                    "+https://github.com/ajendras/dorking-scout)"
-                )
-            },
+    def __init__(self, timeout: float = 12.0):
+        self.timeout = httpx.Timeout(timeout, connect=5.0)
+        self.client: httpx.AsyncClient = httpx.AsyncClient(
+            timeout=self.timeout,
+            headers={"User-Agent": "Mozilla/5.0 (DorkScout/0.2)"},
             follow_redirects=True,
         )
-        self.engines: Dict[str, Dict[str, Any]] = {
-            e["name"].lower(): e for e in get_search_engines()
+        self.engines = {
+            eng["name"].lower(): eng for eng in get_search_engines()
         }
 
     async def search_with_rate_limit(
@@ -126,28 +142,28 @@ class SearchClient:
         engine_name: str = "google",
         delay_override: Optional[float] = None,
     ) -> List[str]:
-        """Perform a search on the specified engine with rate limiting."""
+        """Execute a search on the specified engine with appropriate delay."""
         engine_key = engine_name.lower()
         if engine_key not in self.engines:
             engine_key = "google"
-        eng_conf = self.engines[engine_key]
-        base = eng_conf["base"]
-        qparam = eng_conf["query_param"]
-        rate = delay_override if delay_override is not None else eng_conf.get("rate_limit", 1.5)
+        config = self.engines[engine_key]
+        base = config["base"]
+        qparam = config["query_param"]
+        delay = delay_override if delay_override is not None else config.get("rate_limit", 1.0)
 
-        await asyncio.sleep(rate)  # enforce delay between requests
         try:
             resp = await self.client.get(
-                base,
-                params={qparam: query},
+                base, params={qparam: query}, timeout=self.timeout
             )
             resp.raise_for_status()
-            return parse_results(resp.text, engine_key)
-        except httpx.HTTPError as exc:
-            print(f"HTTP error querying {engine_key} for '{query}': {exc}")
+            domains = parse_results(resp.text, engine_key)
+            await asyncio.sleep(delay)
+            return domains
+        except httpx.HTTPError as e:
+            print(f"HTTP error with {engine_key}: {e}")
             return []
-        except Exception as exc:  # pylint: disable=broad-except
-            print(f"Unexpected error with {engine_key}: {exc}")
+        except Exception as e:  # pylint: disable=broad-except
+            print(f"Unexpected error with {engine_key}: {e}")
             return []
 
     async def close(self) -> None:
@@ -156,76 +172,52 @@ class SearchClient:
 
 
 async def bulk_process(
-    category: Optional[str] = None,
     tech: Optional[str] = None,
-    terms: Optional[List[str]] = None,
-    output: str = "dorkscout_bulk.csv",
-    limit: int = 100,
+    category: Optional[str] = None,
+    terms: List[str] = None,
+    limit: int = 50,
+    output: str = "results.csv",
 ) -> None:
-    """CLI-friendly bulk processor.
+    """Run searches for multiple terms, enrich, dedup and write CSV.
 
-    Processes multiple terms for a given category or tech.
-    Outputs a CSV with enriched DiscoveryResult data.
+    Used by the CLI bulk subcommand.
     """
-    if terms is None or len(terms) == 0:
-        terms = [""]
-
-    client = SearchClient(timeout=12.0)
-    all_domains: List[str] = []
+    if terms is None:
+        terms = []
+    client = SearchClient(timeout=10.0)
+    store = DiscoveryStore(db_path=":memory:")  # for bulk, in mem
+    all_results: List[DiscoveryResult] = []
+    seen_domains: set[str] = set()
     try:
-        for term_idx, term in enumerate(terms[:8]):  # safety limit on terms
-            try:
-                dork_patterns = get_dorks(category=category, tech=tech)
-                for dork in dork_patterns[:3]:
-                    query = build_query(dork, term)
-                    domains = await client.search_with_rate_limit(
-                        query, dork.engine, delay_override=1.0
-                    )
-                    all_domains.extend(domains)
-            except ValueError:
-                continue  # skip bad category
-
-        # Deduplicate preserving order
-        seen: set[str] = set()
-        unique_domains: List[str] = [
-            d for d in all_domains if not (d in seen or seen.add(d)) and not is_noise_domain(d)
-        ][:limit]
-
-        # Create results (minimal detection for speed in bulk)
-        results: List[DiscoveryResult] = []
-        for domain in unique_domains:
-            tech_list = [tech] if tech and tech.strip() else detect_technologies("")
-            result = DiscoveryResult(
-                domain=domain,
-                tech=tech_list,
-                url=f"https://{domain}",
-                detected_at=datetime.now(timezone.utc).isoformat(),
-                title="",
-                domain_age_days=None,
-                creation_date=None,
-                ssl_issuer=None,
-                ssl_valid_from=None,
-                ssl_valid_to=None,
-            )
-            results.append(result)
-
-        # Enrich (limited)
-        await enrich_discovery_results(results[:6])
-
-        # Write CSV
-        _write_csv(results, output)
-        print(
-            f"✅ Bulk processing completed: {len(results)} unique domains saved to {output}"
-        )
-    except Exception as exc:  # pylint: disable=broad-except
-        print(f"❌ Bulk processing failed: {exc}")
-        raise
+        for term in terms:
+            dorks = get_dorks(tech=tech, category=category)
+            for dork in dorks[:2]:  # limit per term
+                q = build_query(dork, term)
+                domains = await client.search_with_rate_limit(q, dork.engine)
+                for dom in domains:
+                    if dom not in seen_domains and len(seen_domains) < limit:
+                        seen_domains.add(dom)
+                        # create result
+                        res = DiscoveryResult(
+                            domain=dom,
+                            tech=detect_technologies(""),  # would fetch in real
+                            url=f"https://{dom}",
+                            detected_at=datetime.now().isoformat(),
+                        )
+                        all_results.append(res)
+        # enrich
+        await enrich_discovery_results(all_results)
+        # write csv
+        _write_csv(all_results, output)
+        print(f"Bulk processing complete. Wrote {len(all_results)} results to {output}")
     finally:
         await client.close()
 
 
 def _write_csv(results: List[DiscoveryResult], filepath: str) -> None:
-    """Internal helper to write enriched results to CSV."""
+    """Write list of DiscoveryResult to CSV with all metadata fields."""
+    if not results:
+        return
     fieldnames = [
         "domain",
         "tech",
@@ -238,23 +230,21 @@ def _write_csv(results: List[DiscoveryResult], filepath: str) -> None:
         "ssl_valid_from",
         "ssl_valid_to",
     ]
-    with open(filepath, "w", newline="", encoding="utf-8") as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for result in results:
-            row = result.model_dump(mode="json")
+        for r in results:
+            row = r.model_dump(mode="json")
             row["tech"] = ";".join(row.get("tech", []))
-            # ensure all fields present
-            for fn in fieldnames:
-                if fn not in row or row[fn] is None:
-                    row[fn] = ""
+            for k in ("title", "creation_date", "ssl_issuer", "ssl_valid_from", "ssl_valid_to"):
+                if k not in row or row[k] is None:
+                    row[k] = ""
             writer.writerow(row)
 
 
 __all__ = [
-    "SearchClient",
     "parse_results",
-    "bulk_process",
     "is_noise_domain",
-    "NOISE_DOMAINS",
+    "SearchClient",
+    "bulk_process",
 ]
