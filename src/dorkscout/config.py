@@ -154,6 +154,44 @@ DEFAULT_DORK_DB: Dict[str, Any] = {
                 "engine": "yandex",
             },
         ],
+        "WordPress": [
+            {
+                "signature": '"powered by wordpress" OR "wp-content/themes" OR "wp-includes" -site:wordpress.com -site:wp.com',
+                "engine": "google",
+            },
+            {
+                "signature": 'inurl:wp-content intitle:wordpress OR "wp-json"',
+                "engine": "bing",
+            },
+        ],
+        "React": [
+            {
+                "signature": '("built with react" OR reactjs OR "react.js") (store OR shop OR site) -github -docs',
+                "engine": "google",
+            },
+        ],
+        "Braintree": [
+            {
+                "signature": '"powered by braintree" OR "braintree checkout" OR "braintree.js"',
+                "engine": "google",
+            },
+        ],
+        "PrestaShop": [
+            {
+                "signature": '"powered by prestashop" OR prestashop (checkout OR cart)',
+                "engine": "google",
+            },
+            {
+                "signature": 'inurl:prestashop intitle:store',
+                "engine": "duckduckgo",
+            },
+        ],
+        "Cloudflare": [
+            {
+                "signature": '("protected by cloudflare" OR "cloudflare ray") -site:cloudflare.com',
+                "engine": "google",
+            },
+        ],
     },
     "tech_to_category": {
         "Stripe": "payment_gateways",
@@ -167,6 +205,11 @@ DEFAULT_DORK_DB: Dict[str, Any] = {
         "Financial Reports": "documents",
         "Legal Contracts": "documents",
         "Resumes": "documents",
+        "WordPress": "platforms",
+        "React": "platforms",
+        "Braintree": "payment_gateways",
+        "PrestaShop": "platforms",
+        "Cloudflare": "platforms",
     },
 }
 
