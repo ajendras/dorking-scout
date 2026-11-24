@@ -1,29 +1,28 @@
-"""Search client and result parsing for multiple engines.
+"""Multi-engine search client and bulk processing for Dork Scout.
 
-Provides async SearchClient with rate limiting per engine, parse_results that
-extracts clean second-level domains from different search engine HTML formats
-(Google redirect links, direct links, Baidu etc). Includes noise filtering,
-bulk processing helper and CSV export.
+Provides async SearchClient that can query Google, Bing, DuckDuckGo, Baidu and Yandex
+with proper rate limiting and HTML parsing tailored to each engine's result format.
+Also includes bulk_process for the CLI that runs multiple terms, deduplicates against
+noise domains and previously seen (via store), enriches and exports to CSV.
 """
 
 import asyncio
 import csv
 import re
-from datetime import datetime
-from io import StringIO
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
 from bs4 import BeautifulSoup
-from urllib.parse import parse_qs, unquote_plus, urlparse
 
 from .config import get_search_engines
-from .detector import detect_technologies, enrich_discovery_results
+from .detector import enrich_discovery_results
 from .dorks import build_query, get_dorks
 from .models import DiscoveryResult
 from .store import DiscoveryStore
 
-NOISE_DOMAINS: set[str] = {
+NOISE_DOMAINS = {
     "amazon.com",
     "amazon.co.uk",
     "ebay.com",
@@ -35,106 +34,129 @@ NOISE_DOMAINS: set[str] = {
     "shopify.com",
     "stripe.com",
     "paypal.com",
-    "squareup.com",
     "github.com",
     "wordpress.com",
     "blogspot.com",
     "tumblr.com",
     "medium.com",
-    "youtube.com",
     "facebook.com",
     "instagram.com",
     "twitter.com",
     "linkedin.com",
     "pinterest.com",
+    "youtube.com",
+    "example.com",
+    "test.com",
+    "localhost",
+    "127.0.0.1",
 }
 
 
 def is_noise_domain(domain: str) -> bool:
-    """Return True if domain is a known noisy or irrelevant site."""
-    if not domain:
+    """Check if domain is likely noise (marketplace, social, known big site)."""
+    if not domain or not isinstance(domain, str):
         return True
-    d = domain.lower()
+    d = domain.lower().strip().rstrip(".")
     if any(nd in d for nd in NOISE_DOMAINS):
         return True
-    # avoid common hosting / cdn
-    if re.search(
-        r"\.(vercel\.app|herokuapp\.com|github\.io|weebly\.com|wixsite\.com)$", d
-    ):
+    # simple second level check
+    parts = d.split(".")
+    if len(parts) >= 2 and ".".join(parts[-2:]) in NOISE_DOMAINS:
         return True
     return False
 
 
 def parse_results(html: str, engine: str = "google") -> List[str]:
-    """Extract unique, non-noise second-level domains from search result HTML.
+    """Extract unique second-level domains from search engine result HTML.
 
-    Handles Google redirector (/url?q=), direct <a href>, Baidu style links
-    and other engines. Updated to catch the direct https://example.com links
-    that the previous version missed.
+    Uses engine-specific selectors because each has different markup.
+    Returns list of clean domains (no protocol, no path).
     """
-    if not isinstance(html, str) or len(html.strip()) < 10:
+    if not html or len(html.strip()) < 100:
         return []
 
     soup = BeautifulSoup(html, "html.parser")
-    seen: set[str] = set()
-    engine_lower = engine.lower()
+    domains: set[str] = set()
 
-    for a_tag in soup.find_all("a", href=True):
-        href = a_tag["href"].strip()
-        if not href or len(href) < 5 or href.startswith(("#", "javascript:", "tel:")):
-            continue
+    if engine == "google":
+        for g in soup.select("a[href]"):
+            href = g.get("href", "")
+            if "url?q=" in href:
+                match = re.search(r"url\?q=https?://([^&/]+)", href)
+                if match:
+                    dom = match.group(1).lower()
+                    if not is_noise_domain(dom):
+                        domains.add(dom)
+    elif engine == "bing":
+        for item in soup.select("li.b_algo a"):
+            href = item.get("href", "")
+            if href.startswith("http"):
+                match = re.search(r"https?://([^/]+)", href)
+                if match:
+                    dom = match.group(1).lower()
+                    if not is_noise_domain(dom):
+                        domains.add(dom)
+    elif engine == "duckduckgo":
+        for a in soup.select("a.result__a"):
+            href = a.get("href", "")
+            match = re.search(r"https?://([^/]+)", href)
+            if match:
+                dom = match.group(1).lower()
+                if not is_noise_domain(dom):
+                    domains.add(dom)
+    elif engine == "baidu":
+        for a in soup.select("a[href]"):
+            href = a.get("href", "")
+            if "http" in href:
+                match = re.search(r"https?://([^/\"']+)", href)
+                if match:
+                    dom = match.group(1).lower()
+                    if not is_noise_domain(dom) and "baidu.com" not in dom:
+                        domains.add(dom)
+    elif engine == "yandex":
+        for a in soup.select("a[href]"):
+            href = a.get("href", "")
+            match = re.search(r"https?://([^/\"'\s]+)", href)
+            if match:
+                dom = match.group(1).lower()
+                if not is_noise_domain(dom) and "yandex." not in dom:
+                    domains.add(dom)
 
-        # Resolve the actual target URL for engines that use redirectors
-        target = href
-        if engine_lower in ("google", "bing", "duckduckgo") and "/url" in href:
-            try:
-                parsed = urlparse(href)
-                params = parse_qs(parsed.query)
-                for key in ("q", "url", "u"):
-                    if key in params and params[key]:
-                        target = unquote_plus(params[key][0])
-                        break
-            except Exception:
-                target = href
+    # fallback generic
+    if not domains:
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            match = re.search(r"https?://([a-z0-9.-]+\.[a-z]{2,})", href, re.I)
+            if match:
+                dom = match.group(1).lower()
+                if not is_noise_domain(dom) and len(dom) > 4:
+                    domains.add(dom)
 
-        # Extract domain
-        try:
-            if not any(target.startswith(p) for p in ("http://", "https://")):
-                if target.startswith("//"):
-                    target = "https:" + target
-                else:
-                    target = "https://" + target
-            parsed = urlparse(target)
-            if parsed.netloc:
-                domain = parsed.netloc.lower()
-                if domain.startswith("www."):
-                    domain = domain[4:]
-                if (
-                    domain
-                    and "." in domain
-                    and not is_noise_domain(domain)
-                    and domain not in seen
-                ):
-                    seen.add(domain)
-        except (ValueError, AttributeError):
-            continue
-
-    return sorted(seen)
+    return sorted(list(domains))
 
 
 class SearchClient:
-    """Async HTTP client for rate-limited searches across multiple engines."""
+    """Async client for rate-limited searches across multiple engines.
+
+    Handles query encoding, fetching, parsing and sleep between requests per engine's rate_limit.
+    """
 
     def __init__(self, timeout: float = 12.0):
-        self.timeout = httpx.Timeout(timeout, connect=5.0)
-        self.client: httpx.AsyncClient = httpx.AsyncClient(
-            timeout=self.timeout,
-            headers={"User-Agent": "Mozilla/5.0 (DorkScout/0.2)"},
+        self.timeout = timeout
+        self.engines = get_search_engines()
+        self.client = httpx.AsyncClient(
+            timeout=httpx.Timeout(timeout),
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 (compatible; DorkScout/0.1; "
+                    "+https://github.com/ajendras/dorking-scout)"
+                )
+            },
             follow_redirects=True,
         )
-        self.engines = {
-            eng["name"].lower(): eng for eng in get_search_engines()
-        }
+
+    async def close(self) -> None:
+        await self.client.aclose()
 
     async def search_with_rate_limit(
         self,
@@ -142,82 +164,36 @@ class SearchClient:
         engine_name: str = "google",
         delay_override: Optional[float] = None,
     ) -> List[str]:
-        """Execute a search on the specified engine with appropriate delay."""
-        engine_key = engine_name.lower()
-        if engine_key not in self.engines:
-            engine_key = "google"
-        config = self.engines[engine_key]
-        base = config["base"]
-        qparam = config["query_param"]
-        delay = delay_override if delay_override is not None else config.get("rate_limit", 1.0)
-
+        """Perform search on given engine with rate limit sleep."""
+        engine_cfg = next(
+            (e for e in self.engines if e["name"].lower() == engine_name.lower()),
+            self.engines[0],
+        )
+        rate = delay_override if delay_override is not None else engine_cfg.get("rate_limit", 1.0)
+        base_url = engine_cfg["base"]
+        param = engine_cfg["query_param"]
         try:
             resp = await self.client.get(
-                base, params={qparam: query}, timeout=self.timeout
+                base_url,
+                params={param: query},
             )
             resp.raise_for_status()
-            domains = parse_results(resp.text, engine_key)
-            await asyncio.sleep(delay)
-            return domains
-        except httpx.HTTPError as e:
-            print(f"HTTP error with {engine_key}: {e}")
+            domains = parse_results(resp.text, engine_name.lower())
+            await asyncio.sleep(rate)
+            return domains[:30]  # limit per query
+        except httpx.HTTPError:
+            await asyncio.sleep(rate)
             return []
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"Unexpected error with {engine_key}: {e}")
+        except Exception:  # pylint: disable=broad-except
+            await asyncio.sleep(rate)
             return []
 
-    async def close(self) -> None:
-        """Close the underlying HTTP client."""
-        await self.client.aclose()
 
-
-async def bulk_process(
-    tech: Optional[str] = None,
-    category: Optional[str] = None,
-    terms: List[str] = None,
-    limit: int = 50,
-    output: str = "results.csv",
-) -> None:
-    """Run searches for multiple terms, enrich, dedup and write CSV.
-
-    Used by the CLI bulk subcommand.
-    """
-    if terms is None:
-        terms = []
-    client = SearchClient(timeout=10.0)
-    store = DiscoveryStore(db_path=":memory:")  # for bulk, in mem
-    all_results: List[DiscoveryResult] = []
-    seen_domains: set[str] = set()
-    try:
-        for term in terms:
-            dorks = get_dorks(tech=tech, category=category)
-            for dork in dorks[:2]:  # limit per term
-                q = build_query(dork, term)
-                domains = await client.search_with_rate_limit(q, dork.engine)
-                for dom in domains:
-                    if dom not in seen_domains and len(seen_domains) < limit:
-                        seen_domains.add(dom)
-                        # create result
-                        res = DiscoveryResult(
-                            domain=dom,
-                            tech=detect_technologies(""),  # would fetch in real
-                            url=f"https://{dom}",
-                            detected_at=datetime.now().isoformat(),
-                        )
-                        all_results.append(res)
-        # enrich
-        await enrich_discovery_results(all_results)
-        # write csv
-        _write_csv(all_results, output)
-        print(f"Bulk processing complete. Wrote {len(all_results)} results to {output}")
-    finally:
-        await client.close()
-
-
-def _write_csv(results: List[DiscoveryResult], filepath: str) -> None:
+async def _write_csv(results: List[DiscoveryResult], output: str = "results.csv") -> None:
     """Write list of DiscoveryResult to CSV with all metadata fields."""
     if not results:
         return
+
     fieldnames = [
         "domain",
         "tech",
@@ -230,7 +206,9 @@ def _write_csv(results: List[DiscoveryResult], filepath: str) -> None:
         "ssl_valid_from",
         "ssl_valid_to",
     ]
-    with open(filepath, "w", newline="", encoding="utf-8") as f:
+    out_path = Path(output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for r in results:
@@ -242,9 +220,73 @@ def _write_csv(results: List[DiscoveryResult], filepath: str) -> None:
             writer.writerow(row)
 
 
-__all__ = [
-    "parse_results",
-    "is_noise_domain",
-    "SearchClient",
-    "bulk_process",
-]
+async def bulk_process(
+    tech: Optional[str] = None,
+    category: Optional[str] = None,
+    terms: Optional[List[str]] = None,
+    limit: int = 50,
+    output: str = "results.csv",
+) -> None:
+    """Run searches for multiple terms, enrich, dedup and write CSV.
+
+    Used by the CLI bulk subcommand.
+    Uses in-memory store to avoid polluting the main DB.
+    """
+    if terms is None:
+        terms = []
+    client = SearchClient(timeout=10.0)
+    store = DiscoveryStore(db_path=":memory:")  # for bulk, in mem
+    all_domains: List[str] = []
+    queries_used: List[str] = []
+
+    for term in terms:
+        try:
+            patterns = get_dorks(tech=tech, category=category)
+            for pattern in patterns[:3]:  # limit per term to stay fast
+                q = build_query(pattern, term)
+                queries_used.append(q)
+                domains = await client.search_with_rate_limit(
+                    q, pattern.engine
+                )
+                all_domains.extend(domains)
+        except Exception:  # pylint: disable=broad-except
+            continue
+
+    # dedup preserving order, remove noise
+    seen: set[str] = set()
+    unique_domains = [
+        d for d in all_domains
+        if not (d in seen or seen.add(d)) and not is_noise_domain(d)
+    ][:limit]
+
+    # build results
+    results: List[DiscoveryResult] = []
+    for domain in unique_domains:
+        result = DiscoveryResult(
+            domain=domain,
+            tech=[tech] if tech else [],
+            url=f"https://{domain}",
+            detected_at=datetime.now(timezone.utc).isoformat(),
+            title="",
+        )
+        results.append(result)
+
+    # enrich (network calls limited by the helper)
+    await enrich_discovery_results(results)
+
+    # persist using the in-memory store (for consistency with other paths)
+    try:
+        primary_query = queries_used[0] if queries_used else f"bulk-{tech or category}"
+        store.record_search(
+            query=primary_query,
+            results=results,
+            category=category,
+            tech=tech,
+            term=";".join(terms),
+            engine="bulk",
+        )
+    except Exception:  # pylint: disable=broad-except
+        pass  # non fatal for bulk
+
+    await _write_csv(results, output)
+    await client.close()
