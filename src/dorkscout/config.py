@@ -14,7 +14,7 @@ email alerts) and webhook defaults used by the AlertScheduler.
 import copy
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from pydantic import ValidationError
 
@@ -275,6 +275,34 @@ ALERT_CONFIG: Dict[str, Any] = {
     "cooldown_minutes": 30,
 }
 
+# Keywords that flag big brands or large marketplaces. Used by the
+# relevance scoring in detector.py to assign lower scores so that
+# smaller independent sites rise to the top of results.
+BIG_BRAND_KEYWORDS: Set[str] = {
+    "amazon",
+    "ebay",
+    "walmart",
+    "target",
+    "bestbuy",
+    "aliexpress",
+    "etsy",
+    "shopify",
+    "bigcartel",
+    "squarespace",
+    "wix",
+    "weebly",
+    "blogspot",
+    "wordpress.com",
+    "github.io",
+    "stripe.com",
+    "paypal.com",
+    "squareup.com",
+    "braintreepayments.com",
+    "adyen",
+    "razorpay",
+    "marketplace",
+}
+
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """Return a new dict with override deeply merged into base.
@@ -446,6 +474,15 @@ def get_db_path() -> Path:
     The file is created automatically by DiscoveryStore on first use.
     """
     return DB_PATH
+
+
+def get_big_brand_keywords() -> Set[str]:
+    """Return set of big-brand keywords used by relevance scoring.
+
+    Smaller independent sites (domains that do not contain any of these
+    keywords) receive significantly higher relevance scores.
+    """
+    return BIG_BRAND_KEYWORDS.copy()
 
 
 DORK_DB: Dict[str, Any] = _deep_merge(DEFAULT_DORK_DB, _load_json_override())
