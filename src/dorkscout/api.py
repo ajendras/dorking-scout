@@ -14,7 +14,8 @@ Endpoints:
 - GET /api/dorks — returns dork patterns for a technology (used by the
   companion browser extension)
 - GET /api/analytics — returns aggregated tech distribution used by the
-  new analytics dashboard (pie/bar charts + table)
+  new analytics dashboard (pie/bar charts + table). Now supports
+  optional date_from, date_to and tech query params for live filtering.
 
 All endpoints validate input, handle errors gracefully and respect rate limits.
 Search is intentionally limited in scope to keep responses under 4 seconds.
@@ -414,19 +415,40 @@ async def generate_dorks(
 
 
 @router.get("/analytics", response_model=AnalyticsSummary)
-def get_analytics(request: Request) -> Dict[str, Any]:
-    """Return aggregated analytics for the dashboard.
+def get_analytics(
+    request: Request,
+    date_from: Optional[str] = Query(
+        None,
+        description="Start date (YYYY-MM-DD)",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+    ),
+    date_to: Optional[str] = Query(
+        None,
+        description="End date (YYYY-MM-DD)",
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+    ),
+    tech: Optional[str] = Query(
+        None, description="Comma-separated techs to filter by"
+    ),
+) -> Dict[str, Any]:
+    """Return aggregated analytics for the dashboard, optionally filtered.
 
-    Pulls tech distribution from the persistent store (counts how many
-    domains mention each technology). Used by the /analytics UI to
-    render Chart.js pie and bar graphs plus the summary table.
+    date_from/date_to limit results by first_seen timestamp.
+    tech limits both total and distribution to matching technologies.
+    Used by the analytics UI for live Chart.js updates on filter changes.
     """
     store: Optional[DiscoveryStore] = getattr(request.app.state, "store", None)
     if not store:
         raise HTTPException(status_code=500, detail="Store not initialized")
 
-    distribution = store.get_tech_distribution()
-    total = store.get_total_unique_domains()
+    tech_filter = [t.strip() for t in tech.split(",")] if tech else None
+
+    distribution = store.get_tech_distribution(
+        date_from=date_from, date_to=date_to, tech_filter=tech_filter
+    )
+    total = store.get_total_unique_domains(
+        date_from=date_from, date_to=date_to, tech_filter=tech_filter
+    )
 
     # Top 10 for the bar chart
     top_techs = sorted(
@@ -440,6 +462,11 @@ def get_analytics(request: Request) -> Dict[str, Any]:
         "tech_distribution": distribution,
         "top_techs": top_techs,
         "last_updated": datetime.now(timezone.utc).isoformat(),
+        "applied_filters": {
+            "date_from": date_from,
+            "date_to": date_to,
+            "techs": tech_filter,
+        },
     }
 
 

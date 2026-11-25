@@ -1,91 +1,78 @@
+"""Persistent SQLite store for Dork Scout.
+
+Handles search history, unique domain accumulation (with multi-tech support
+via JSON column), scheduled jobs and analytics queries. The
+get_tech_distribution() and get_total_unique_domains() methods now accept
+optional date_from, date_to and tech_filter parameters to power the
+live-filtered analytics dashboard.
+"""
+
+import json
 import sqlite3
-import contextlib
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import get_db_path
-from .models import DiscoveryResult, StoredDomain, SearchHistory, ScheduledJob
+from .models import DiscoveryResult, ScheduledJob
 
 
 class DiscoveryStore:
-    """Persistent SQLite store for domains, search history and scheduled jobs.
+    """SQLite-backed store for searches, domains and scheduled jobs.
 
-    Supports :memory: for tests by keeping a single persistent connection.
-    All tables are created with CREATE IF NOT EXISTS.
+    All timestamps are stored as ISO strings. Techs are stored as JSON
+    arrays to support multiple technologies per domain. Filtering for
+    analytics uses SQLite JSON functions (json_each).
     """
 
-    def __init__(self, db_path: Optional[str] = None):
-        self.db_path = db_path or str(get_db_path())
-        self._memory_conn: Optional[sqlite3.Connection] = None
-        if self.db_path == ":memory:":
-            self._memory_conn = sqlite3.connect(":memory:", check_same_thread=False)
-            self._create_tables(self._memory_conn)
-        else:
-            Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-            self._create_tables(None)
+    def __init__(self, db_path: Optional[Path] = None):
+        if db_path is None:
+            db_path = get_db_path()
+        self.db_path = db_path
+        self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self._ensure_tables()
 
-    @contextlib.contextmanager
-    def _get_connection(self):
-        """Context manager that reuses the same connection for :memory:."""
-        if self._memory_conn is not None:
-            yield self._memory_conn
-            return
-        conn = sqlite3.connect(self.db_path)
-        try:
-            self._create_tables(conn)
-            yield conn
-        finally:
-            conn.close()
-
-    def _create_tables(self, conn: Optional[sqlite3.Connection] = None) -> None:
-        """Create all required tables (idempotent)."""
-        if conn is None:
-            with self._get_connection() as c:
-                self._create_tables(c)
-            return
-
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS domains (
-                domain TEXT PRIMARY KEY,
-                first_seen TEXT,
-                last_seen TEXT,
-                seen_count INTEGER DEFAULT 1,
-                tech TEXT,
-                title TEXT,
-                domain_age_days INTEGER,
-                ssl_issuer TEXT,
-                ssl_valid_to TEXT
-            );
+    def _ensure_tables(self):
+        """Create required tables if they do not exist."""
+        self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS searches (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                query TEXT,
+                query TEXT NOT NULL,
                 category TEXT,
                 tech TEXT,
                 term TEXT,
-                results_count INTEGER,
                 engine TEXT,
-                timestamp TEXT
+                result_count INTEGER,
+                searched_at TEXT DEFAULT (datetime('now'))
             );
+
+            CREATE TABLE IF NOT EXISTS domains (
+                domain TEXT PRIMARY KEY,
+                first_seen TEXT DEFAULT (datetime('now')),
+                last_seen TEXT DEFAULT (datetime('now')),
+                seen_count INTEGER DEFAULT 1,
+                techs TEXT,  -- JSON array
+                title TEXT,
+                domain_age_days INTEGER,
+                ssl_issuer TEXT,
+                ssl_valid_to TEXT,
+                relevance_score REAL
+            );
+
             CREATE TABLE IF NOT EXISTS scheduled_jobs (
                 id TEXT PRIMARY KEY,
-                name TEXT,
+                name TEXT NOT NULL,
                 tech TEXT,
                 term TEXT,
                 interval_hours INTEGER,
                 alert_type TEXT,
-                alert_target TEXT,
+                target TEXT,
                 last_run TEXT,
                 last_alerted TEXT
             );
         """)
-        conn.commit()
-
-    def get_total_unique_domains(self) -> int:
-        """Count distinct persisted domains."""
-        with self._get_connection() as conn:
-            row = conn.execute("SELECT COUNT(*) as cnt FROM domains").fetchone()
-            return row[0] if row else 0
+        self.conn.commit()
 
     def record_search(
         self,
@@ -93,127 +80,173 @@ class DiscoveryStore:
         results: List[DiscoveryResult],
         category: Optional[str] = None,
         tech: Optional[str] = None,
-        term: str = "",
+        term: Optional[str] = None,
         engine: str = "multi",
-    ) -> None:
-        """Record a search and persist fresh domains."""
-        timestamp = datetime.now().isoformat()
-        with self._get_connection() as conn:
-            conn.execute(
-                "INSERT INTO searches (query, category, tech, term, results_count, engine, timestamp) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (query, category, tech, term, len(results), engine, timestamp),
+    ):
+        """Record a search and upsert discovered domains with techs."""
+        now = datetime.now(timezone.utc).isoformat()
+        self.conn.execute(
+            """
+            INSERT INTO searches
+            (query, category, tech, term, engine, result_count, searched_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (query, category, tech, term, engine, len(results), now),
+        )
+
+        for result in results:
+            techs_json = json.dumps(result.tech or [])
+            # Simple upsert that merges tech lists
+            self.conn.execute(
+                """
+                INSERT INTO domains (
+                    domain, first_seen, last_seen, seen_count, techs,
+                    title, domain_age_days, ssl_issuer, ssl_valid_to,
+                    relevance_score
+                ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(domain) DO UPDATE SET
+                    last_seen = excluded.last_seen,
+                    seen_count = domains.seen_count + 1,
+                    techs = excluded.techs,
+                    title = COALESCE(excluded.title, domains.title),
+                    domain_age_days = COALESCE(excluded.domain_age_days, domains.domain_age_days),
+                    ssl_issuer = COALESCE(excluded.ssl_issuer, domains.ssl_issuer),
+                    ssl_valid_to = COALESCE(excluded.ssl_valid_to, domains.ssl_valid_to),
+                    relevance_score = COALESCE(excluded.relevance_score, domains.relevance_score)
+                """,
+                (
+                    result.domain,
+                    result.detected_at or now,
+                    now,
+                    techs_json,
+                    getattr(result, "title", None),
+                    getattr(result, "domain_age_days", None),
+                    getattr(result, "ssl_issuer", None),
+                    getattr(result, "ssl_valid_to", None),
+                    getattr(result, "relevance_score", None),
+                ),
             )
-            for r in results:
-                conn.execute(
-                    """
-                    INSERT INTO domains (domain, first_seen, last_seen, seen_count, tech, title, domain_age_days, ssl_issuer, ssl_valid_to)
-                    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
-                    ON CONFLICT(domain) DO UPDATE SET
-                        last_seen = excluded.last_seen,
-                        seen_count = seen_count + 1,
-                        tech = COALESCE(excluded.tech, tech)
-                    """,
-                    (
-                        r.domain,
-                        timestamp,
-                        timestamp,
-                        ",".join(r.tech),
-                        r.title or "",
-                        r.domain_age_days,
-                        r.ssl_issuer or "",
-                        r.ssl_valid_to or "",
-                    ),
-                )
-            conn.commit()
+        self.conn.commit()
 
     def get_search_history(self, limit: int = 20) -> List[Dict[str, Any]]:
-        """Return recent searches."""
-        with self._get_connection() as conn:
-            rows = conn.execute(
-                "SELECT * FROM searches ORDER BY timestamp DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
-            return [dict(zip([c[0] for c in conn.description], row)) for row in rows]
+        """Return the most recent searches."""
+        cursor = self.conn.execute(
+            "SELECT * FROM searches ORDER BY searched_at DESC LIMIT ?",
+            (limit,),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_total_unique_domains(
+        self,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        tech_filter: Optional[List[str]] = None,
+    ) -> int:
+        """Return count of unique domains, optionally filtered by date and tech."""
+        if tech_filter:
+            placeholders = ",".join("?" for _ in tech_filter)
+            query = f"""
+                SELECT COUNT(DISTINCT d.domain) as total
+                FROM domains d, json_each(d.techs) j
+                WHERE j.value IN ({placeholders})
+            """
+            params: List[Any] = list(tech_filter)
+        else:
+            query = "SELECT COUNT(DISTINCT domain) as total FROM domains WHERE 1=1"
+            params = []
+
+        if date_from:
+            query += " AND first_seen >= ?"
+            params.append(f"{date_from}T00:00:00")
+        if date_to:
+            query += " AND first_seen <= ?"
+            params.append(f"{date_to}T23:59:59")
+
+        cursor = self.conn.execute(query, params)
+        row = cursor.fetchone()
+        return row["total"] if row else 0
+
+    def get_tech_distribution(
+        self,
+        date_from: Optional[str] = None,
+        date_to: Optional[str] = None,
+        tech_filter: Optional[List[str]] = None,
+    ) -> Dict[str, int]:
+        """Return tech -> count map, optionally filtered by date range and tech list.
+
+        Uses json_each to count domains per technology. When a tech_filter
+        is supplied only those technologies are returned.
+        """
+        query = """
+            SELECT j.value as tech, COUNT(DISTINCT d.domain) as count
+            FROM domains d, json_each(d.techs) j
+            WHERE 1 = 1
+        """
+        params: List[Any] = []
+
+        if date_from:
+            query += " AND d.first_seen >= ?"
+            params.append(f"{date_from}T00:00:00")
+        if date_to:
+            query += " AND d.first_seen <= ?"
+            params.append(f"{date_to}T23:59:59")
+        if tech_filter:
+            placeholders = ",".join("?" for _ in tech_filter)
+            query += f" AND j.value IN ({placeholders})"
+            params.extend(tech_filter)
+
+        query += " GROUP BY j.value ORDER BY count DESC"
+        cursor = self.conn.execute(query, params)
+        return {row["tech"]: row["count"] for row in cursor.fetchall()}
 
     def get_unique_domains(
         self, limit: int = 50, tech: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """Return persisted unique domains, optionally filtered by tech."""
-        with self._get_connection() as conn:
-            if tech:
-                rows = conn.execute(
-                    "SELECT * FROM domains WHERE tech LIKE ? ORDER BY first_seen DESC LIMIT ?",
-                    (f"%{tech}%", limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    "SELECT * FROM domains ORDER BY first_seen DESC LIMIT ?",
-                    (limit,),
-                ).fetchall()
-            return [dict(zip([c[0] for c in conn.description], row)) for row in rows]
+        """Return list of stored domains, optionally filtered by a single tech."""
+        if tech:
+            query = """
+                SELECT * FROM domains, json_each(techs) j
+                WHERE j.value = ? ORDER BY first_seen DESC LIMIT ?
+            """
+            params = [tech, limit]
+        else:
+            query = "SELECT * FROM domains ORDER BY first_seen DESC LIMIT ?"
+            params = [limit]
+        cursor = self.conn.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
 
-    def get_tech_distribution(self) -> Dict[str, int]:
-        """Aggregate tech counts across all domains."""
-        with self._get_connection() as conn:
-            rows = conn.execute(
-                "SELECT tech FROM domains"
-            ).fetchall()
-            distribution: Dict[str, int] = {}
-            for (tech_str,) in rows:
-                if tech_str:
-                    for t in tech_str.split(","):
-                        t = t.strip()
-                        if t:
-                            distribution[t] = distribution.get(t, 0) + 1
-            return distribution
-
-    def add_scheduled_job(self, job: ScheduledJob) -> None:
-        """Persist a new scheduled monitoring job."""
-        with self._get_connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO scheduled_jobs
-                (id, name, tech, term, interval_hours, alert_type, alert_target, last_run, last_alerted)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    job.id,
-                    job.name,
-                    job.tech,
-                    job.term,
-                    job.interval_hours,
-                    job.alert.alert_type,
-                    job.alert.target,
-                    None,
-                    None,
-                ),
-            )
-            conn.commit()
+    def add_scheduled_job(self, job: ScheduledJob):
+        """Persist a new or updated scheduled monitoring job."""
+        self.conn.execute(
+            """
+            INSERT OR REPLACE INTO scheduled_jobs
+            (id, name, tech, term, interval_hours, alert_type, target, last_run, last_alerted)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job.id,
+                job.name,
+                job.tech,
+                job.term,
+                job.interval_hours,
+                job.alert.alert_type,
+                job.alert.target,
+                job.last_run,
+                job.last_alerted,
+            ),
+        )
+        self.conn.commit()
 
     def get_scheduled_jobs(self) -> List[Dict[str, Any]]:
-        with self._get_connection() as conn:
-            rows = conn.execute("SELECT * FROM scheduled_jobs").fetchall()
-            return [dict(zip([c[0] for c in conn.description], row)) for row in rows]
+        """Return all configured scheduled jobs."""
+        cursor = self.conn.execute("SELECT * FROM scheduled_jobs")
+        return [dict(row) for row in cursor.fetchall()]
 
-    def delete_scheduled_job(self, job_id: str) -> bool:
-        with self._get_connection() as conn:
-            cur = conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (job_id,))
-            conn.commit()
-            return cur.rowcount > 0
+    def delete_scheduled_job(self, job_id: str):
+        """Remove a scheduled job by UUID."""
+        self.conn.execute("DELETE FROM scheduled_jobs WHERE id = ?", (job_id,))
+        self.conn.commit()
 
-
-def is_noise_domain(domain: str) -> bool:
-    """Return True if domain is a known noisy marketplace, blog platform or brand."""
-    noise = {
-        "amazon.com", "ebay.com", "etsy.com", "alibaba.com", "shopify.com",
-        "wordpress.com", "blogspot.com", "github.com", "youtube.com",
-        "facebook.com", "twitter.com", "linkedin.com", "pinterest.com",
-        "wix.com", "squarespace.com", "bigcartel.com",
-    }
-    d = domain.lower().strip()
-    if any(n in d for n in noise):
-        return True
-    if d.endswith((".blogspot.com", ".wordpress.com", ".wixsite.com")):
-        return True
-    return False
+    def close(self):
+        """Close the database connection."""
+        self.conn.close()
