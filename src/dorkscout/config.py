@@ -303,6 +303,13 @@ BIG_BRAND_KEYWORDS: Set[str] = {
     "marketplace",
 }
 
+BACKOFF_CONFIG: Dict[str, Any] = {
+    "max_retries": 3,
+    "base_backoff": 2.0,
+    "max_backoff": 60.0,
+    "use_jitter": True,
+}
+
 
 def _deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """Return a new dict with override deeply merged into base.
@@ -483,6 +490,14 @@ def get_big_brand_keywords() -> Set[str]:
     keywords) receive significantly higher relevance scores.
     """
     return BIG_BRAND_KEYWORDS.copy()
+
+
+def get_backoff_config() -> Dict[str, Any]:
+    """Return backoff settings used by SearchClient for retries on rate-limit
+    or transient errors. Full jitter (random between 0 and current backoff)
+    is applied by default to spread retries and avoid engine blocks.
+    """
+    return BACKOFF_CONFIG.copy()
 
 
 DORK_DB: Dict[str, Any] = _deep_merge(DEFAULT_DORK_DB, _load_json_override())

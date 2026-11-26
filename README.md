@@ -520,7 +520,7 @@ The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks(
 - [x] Improve fingerprint database with 150+ additional app signatures
 - [x] Add relevance scoring that prefers smaller independent sites over big brands
 - [x] Add date-range and tech filters to analytics dashboard with live Chart.js updates
-- [ ] Implement exponential backoff + jitter in SearchClient rate limiting
+- [x] Implement exponential backoff + jitter in SearchClient rate limiting
 - [ ] Add comprehensive integration tests for scheduler jobs and alert payloads
 - [ ] Create CONFIG.md with all options, env vars and extension of dorks.json
 - [ ] Support custom noise-domain blocklist loaded from user config file
