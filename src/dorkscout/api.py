@@ -271,8 +271,9 @@ async def export_results(
             "ssl_issuer",
             "ssl_valid_from",
             "ssl_valid_to",
+            "relevance_score",
         ]
-        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer = csv.DictWriter(output, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
 
         for r in results:

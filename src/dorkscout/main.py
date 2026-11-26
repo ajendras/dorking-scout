@@ -1,14 +1,15 @@
-"""Main entrypoint for Dork Scout.
+"""CLI entrypoint and FastAPI app factory for Dork Scout.
 
-Provides FastAPI app factory, uvicorn runner for the web UI/API, and
-new CLI subcommand `bulk` for headless batch processing of term lists with
-direct CSV output (including metadata enrichment).
+Supports `dork-scout serve` (default) and the new `dork-scout bulk` subcommand.
+The bulk command now correctly calls the async bulk_process() using asyncio.run().
+create_app() wires the DiscoveryStore, AlertScheduler and all routers.
 """
 
 import argparse
 import asyncio
 import sys
-from typing import List
+from pathlib import Path
+from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI
@@ -22,148 +23,105 @@ from .web import router as web_router
 
 
 def create_app() -> FastAPI:
-    """Create and configure the FastAPI application.
+    """FastAPI application factory.
 
-    Registers routers, initialises the persistent store and starts
-    the background AlertScheduler on startup.
+    Attaches routers, initialises persistent SQLite store and starts
+    the background AlertScheduler.
     """
     app = FastAPI(
         title="Dork Scout",
-        description="Discover unique websites by tech stack, payment gateway or product niche using curated search dorks",
-        version="0.2.0",
+        description="Discover unique websites by tech, gateway or niche",
+        version="0.1.0",
     )
 
     app.include_router(api_router)
     app.include_router(web_router)
 
-    # Initialise SQLite store
-    db_path = get_db_path()
-    store = DiscoveryStore(db_path=db_path)
+    # Persistent store
+    store = DiscoveryStore(db_path=get_db_path())
     app.state.store = store
 
-    # Start scheduler for background alerts
-    scheduler = AlertScheduler(store=store)
+    # Background scheduler for alerts
+    scheduler = AlertScheduler(store)
     app.state.scheduler = scheduler
-
-    @app.on_event("startup")
-    async def on_startup():
-        scheduler.start()
-        print(f"✅ Dork Scout started. DB at {db_path}. Scheduler running.")
+    scheduler.start()
 
     @app.on_event("shutdown")
-    async def on_shutdown():
+    def shutdown_scheduler():
         scheduler.shutdown()
 
     return app
 
 
-def _run_bulk(args: argparse.Namespace) -> None:
-    """Execute the bulk subcommand."""
-    terms: List[str] = args.term or []
-    if args.terms_file:
-        try:
-            with open(args.terms_file, "r", encoding="utf-8") as f:
-                file_terms = [line.strip() for line in f.readlines() if line.strip() and not line.startswith("#")]
-                terms.extend(file_terms)
-        except Exception as e:  # pylint: disable=broad-except
-            print(f"Error reading terms file: {e}")
-            sys.exit(1)
-
-    if not terms:
-        terms = ["online store"]  # sensible default
-
-    output_path = args.output
-    print(
-        f"🚀 Starting bulk processing for tech='{args.tech}' category='{args.category}' "
-        f"with {len(terms)} term(s) -> {output_path}"
-    )
-
-    asyncio.run(
-        bulk_process(
-            category=args.category,
-            tech=args.tech,
-            terms=terms,
-            output=output_path,
-            limit=args.limit,
-        )
-    )
-
-
 def run() -> None:
-    """CLI entry point supporting both server and bulk subcommand."""
-    parser = argparse.ArgumentParser(
-        prog="dork-scout",
-        description="Dork Scout - Curated dork search tool with web UI and CLI",
-    )
-    subparsers = parser.add_subparsers(
-        dest="command",
-        help="Command to run (default: start web server)",
-    )
+    """Console entry point supporting both web server and bulk CLI.
 
-    # Serve / web server command (default)
-    serve_parser = subparsers.add_parser(
-        "serve", help="Start the web server and API (default when no subcommand given)"
-    )
-    serve_parser.add_argument(
-        "--host", default="127.0.0.1", help="Host to bind to"
-    )
-    serve_parser.add_argument(
-        "--port", type=int, default=8000, help="Port to listen on"
-    )
+    bulk subcommand now uses asyncio.run(bulk_process(...)) because
+    bulk_process was made async to fix pytest-asyncio compatibility.
+    """
+    parser = argparse.ArgumentParser(prog="dork-scout")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
-    # Bulk command
-    bulk_parser = subparsers.add_parser(
-        "bulk",
-        help="Bulk process multiple terms for a tech/category and output headless CSV",
+    # serve / web server
+    serve_p = subparsers.add_parser(
+        "serve", help="Start the web UI and API server (default)"
     )
-    bulk_parser.add_argument(
-        "--tech",
-        help="Technology to target (e.g. Stripe, Shopify)",
+    serve_p.add_argument("--host", default="127.0.0.1", help="Bind address")
+    serve_p.add_argument("--port", type=int, default=8000, help="Port")
+
+    # bulk
+    bulk_p = subparsers.add_parser(
+        "bulk", help="Run headless bulk search and export to CSV"
     )
-    bulk_parser.add_argument(
-        "--category",
-        help="Category to use (payment_gateways, platforms, niches, documents)",
+    bulk_p.add_argument("--tech", help="Technology name (e.g. Shopify)")
+    bulk_p.add_argument("--category", help="Category (e.g. niches)")
+    bulk_p.add_argument(
+        "--term", action="append", dest="terms", help="Search term(s) - repeatable"
     )
-    bulk_parser.add_argument(
-        "--term",
-        action="append",
-        help="Additional search term. Can be specified multiple times.",
+    bulk_p.add_argument(
+        "--terms-file", type=Path, help="File with one term per line"
     )
-    bulk_parser.add_argument(
-        "--terms-file",
-        type=str,
-        help="Path to a text file with one term per line (comments with # supported)",
-    )
-    bulk_parser.add_argument(
-        "-o",
+    bulk_p.add_argument(
         "--output",
-        default="dorkscout_results.csv",
-        help="Path for output CSV file",
+        "-o",
+        type=Path,
+        default=Path("dorkscout_bulk.csv"),
+        help="Output CSV path",
     )
-    bulk_parser.add_argument(
-        "--limit",
-        type=int,
-        default=80,
-        help="Maximum number of unique domains to return",
-    )
+    bulk_p.add_argument("--limit", type=int, default=20, help="Max results")
 
     args = parser.parse_args()
+    if not args.command:
+        args.command = "serve"
 
-    if args.command == "bulk":
-        _run_bulk(args)
-    else:
-        # default to serve (even if command is serve or None)
-        serve_args = args if args.command == "serve" else None
-        host = serve_args.host if serve_args else "127.0.0.1"
-        port = serve_args.port if serve_args else 8000
-        print(f"🌐 Starting Dork Scout web server at http://{host}:{port}")
+    if args.command == "serve":
+        app = create_app()
         uvicorn.run(
-            "dorkscout.main:create_app",
-            factory=True,
-            host=host,
-            port=port,
+            app,
+            host=args.host,
+            port=args.port,
             log_level="info",
         )
+    elif args.command == "bulk":
+        if not args.tech and not args.category:
+            print("Error: --tech or --category is required for bulk", file=sys.stderr)
+            sys.exit(1)
+
+        results = asyncio.run(
+            bulk_process(
+                tech=args.tech,
+                category=args.category,
+                terms=args.terms or [],
+                terms_file=args.terms_file,
+                output=args.output,
+                limit=args.limit,
+            )
+        )
+        print(
+            f"Bulk processing finished. {len(results)} unique domains written to {args.output}"
+        )
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":
