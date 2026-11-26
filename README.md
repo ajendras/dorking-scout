@@ -285,7 +285,7 @@ List jobs:
 curl http://127.0.0.1:8000/api/schedules
 ```
 
-Delete a job:
+Delete job:
 
 ```bash
 curl -X DELETE http://127.0.0.1:8000/api/schedules/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
@@ -502,7 +502,7 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 pytest
 ```
 
-The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting and preservation of advanced operators), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching (now exercised against the expanded 180+ signature set), the new `enrich_metadata()` / `enrich_discovery_results()` (with mocked HTTP responses), error cases, Pydantic validation and the new `DiscoveryStore` (in-memory mode, record_search, history and unique domains). New tests for `generate_dorks_for_tech()` (with mocked Ollama responses and fallback path) have been added as well as `test_get_dorks_for_documents()` and `test_build_query_with_advanced_operators()`. Store tests now exercise the scheduled_jobs table, add/delete and freshness queries. The analytics test (`test_tech_distribution()`) exercises `get_tech_distribution()` with multi-tech domains. New tests cover `bulk_process()`, `is_noise_domain()`, CSV writing and mocked multi-term execution. **New tests added for `calculate_relevance_score()`** verifying high scores for independent domains and low scores for big-brand domains. **New test added for date-range + tech filters on analytics queries.** All CI tests now pass.
+The suite (`tests/test_dorks.py`, `tests/test_search.py` and `tests/test_scheduler.py`) covers `load_dorks()`, category/tech filtering, `build_query()` term handling (including automatic quoting and preservation of advanced operators), `parse_results()` with mocked Google/Bing/Baidu/Yandex HTML, noise-domain removal, `detect_technologies()` signature matching (now exercised against the expanded 180+ signature set), the new `enrich_metadata()` / `enrich_discovery_results()` (with mocked HTTP responses), error cases, Pydantic validation and the new `DiscoveryStore` (in-memory mode, record_search, history and unique domains). New tests for `generate_dorks_for_tech()` (with mocked Ollama responses and fallback path) have been added as well as `test_get_dorks_for_documents()` and `test_build_query_with_advanced_operators()`. Store tests now exercise the scheduled_jobs table, add/delete and freshness queries. The analytics test (`test_tech_distribution()`) exercises `get_tech_distribution()` with multi-tech domains. New tests cover `bulk_process()`, `is_noise_domain()`, CSV writing and mocked multi-term execution. **New tests added for `calculate_relevance_score()`** verifying high scores for independent domains and low scores for big-brand domains. **New test added for date-range + tech filters on analytics queries.** The new `tests/test_scheduler.py` adds comprehensive integration tests for the `AlertScheduler` including job scheduling/persistence, fresh domain identification using the store, alert payload construction and delivery for webhook and email, cooldown enforcement, and explicit validation of the `AlertPayload` structure including all enriched `DiscoveryResult` fields. All CI tests now pass.
 
 ## 📍 Roadmap
 <!-- roadmap:start -->
@@ -521,7 +521,7 @@ The suite (`tests/test_dorks.py` and `tests/test_search.py`) covers `load_dorks(
 - [x] Add relevance scoring that prefers smaller independent sites over big brands
 - [x] Add date-range and tech filters to analytics dashboard with live Chart.js updates
 - [x] Implement exponential backoff + jitter in SearchClient rate limiting
-- [ ] Add comprehensive integration tests for scheduler jobs and alert payloads
+- [x] Add comprehensive integration tests for scheduler jobs and alert payloads
 - [ ] Create CONFIG.md with all options, env vars and extension of dorks.json
 - [ ] Support custom noise-domain blocklist loaded from user config file
 - [ ] Optimize DiscoveryStore queries with indexes on domain and last_seen
