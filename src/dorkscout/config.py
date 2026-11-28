@@ -13,6 +13,7 @@ email alerts) and webhook defaults used by the AlertScheduler.
 
 import copy
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
@@ -21,8 +22,8 @@ from pydantic import ValidationError
 from .models import Category, DorkPattern
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-DORKS_JSON_PATH = ROOT_DIR / "dorks.json"
-DB_PATH = ROOT_DIR / "dorkscout.db"
+DORKS_JSON_PATH = Path(os.getenv("DORKS_JSON_PATH", str(ROOT_DIR / "dorks.json")))
+DB_PATH = Path(os.getenv("DORKSCOUT_DB_PATH", str(ROOT_DIR / "dorkscout.db")))
 
 # Embedded production-ready defaults. These are realistic, tested dorks
 # that avoid common noise (marketplaces, corporate sites) and work with
@@ -251,10 +252,10 @@ SEARCH_ENGINES: List[Dict[str, str]] = [
 # (e.g. ollama pull llama3.2). The helper falls back gracefully if Ollama
 # is not available.
 OLLAMA_CONFIG: Dict[str, Any] = {
-    "url": "http://localhost:11434/api/generate",
-    "model": "llama3.2",
-    "temperature": 0.7,
-    "timeout": 45.0,
+    "url": os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate"),
+    "model": os.getenv("OLLAMA_MODEL", "llama3.2"),
+    "temperature": float(os.getenv("OLLAMA_TEMPERATURE", "0.7")),
+    "timeout": float(os.getenv("OLLAMA_TIMEOUT", "45.0")),
 }
 
 # SMTP and webhook settings used by AlertScheduler for fresh-domain alerts.
@@ -262,17 +263,17 @@ OLLAMA_CONFIG: Dict[str, Any] = {
 # enabling email alerts. Webhook headers are sent with every POST.
 ALERT_CONFIG: Dict[str, Any] = {
     "smtp": {
-        "host": "smtp.example.com",
-        "port": 587,
-        "user": None,
-        "password": None,
-        "from_email": "alerts@dorkscout.local",
-        "use_tls": True,
+        "host": os.getenv("SMTP_HOST", "smtp.example.com"),
+        "port": int(os.getenv("SMTP_PORT", "587")),
+        "user": os.getenv("SMTP_USER"),
+        "password": os.getenv("SMTP_PASSWORD"),
+        "from_email": os.getenv("SMTP_FROM_EMAIL", "alerts@dorkscout.local"),
+        "use_tls": os.getenv("SMTP_USE_TLS", "true").lower() in ("true", "1", "yes", "on"),
     },
     "webhook": {
         "headers": {"User-Agent": "DorkScout-Alert/0.2"},
     },
-    "cooldown_minutes": 30,
+    "cooldown_minutes": int(os.getenv("ALERT_COOLDOWN_MINUTES", "30")),
 }
 
 # Keywords that flag big brands or large marketplaces. Used by the

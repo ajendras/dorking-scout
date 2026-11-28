@@ -411,27 +411,19 @@ The new `generate_dorks_for_tech()` helper can be used to bootstrap high-quality
 
 See `tests/test_dorks.py` for the validation test suite. New contributions must pass these checks (and the existing test suite). `get_tech_to_category()` and `get_dorks()` automatically pick up extensions. The `build_query()` helper now always quotes additional terms (single- or multi-word) unless already quoted and explicitly preserves advanced operators.
 
+See [CONFIG.md](CONFIG.md) for a complete guide with examples.
+
 </details>
 
 ## 🔧 Configuration
 
-<table>
-<tr><th>Option</th><th>Default</th><th>Description</th></tr>
-<tr><td><code>DORKS_JSON_PATH</code></td><td><code>./dorks.json</code></td><td>Optional file that extends or overrides <code>DEFAULT_DORK_DB</code> (loaded by <code>config.py</code> with deep merge)</td></tr>
-<tr><td><code>SEARCH_ENGINES</code></td><td>Google, Bing, DuckDuckGo, Baidu, Yandex</td><td>List of dicts with <code>base</code>, <code>query_param</code> and <code>rate_limit</code> used by <code>SearchClient</code> (full scraping support for all engines)</td></tr>
-<tr><td><code>OLLAMA_URL</code></td><td><code>http://localhost:11434/api/generate</code></td><td>Local Ollama endpoint used by the LLM dork generator (configurable in <code>config.py</code>)</td></tr>
-<tr><td><code>DEFAULT_LLM_MODEL</code></td><td><code>llama3.2</code></td><td>Model used by <code>generate_dorks_for_tech()</code>. Must be pulled locally with Ollama.</td></tr>
-<tr><td><code>ALERT_CONFIG</code></td><td>SMTP + webhook defaults</td><td>SMTP host/port/credentials (for email alerts) and webhook headers. Edit directly in <code>config.py</code>. Cooldown and TLS settings included.</td></tr>
-<tr><td><code>validate_dork_database()</code></td><td>runs on import</td><td>Pydantic + custom checks for dorks, categories and mappings. Enables safe community extensions (see tests).</td></tr>
-<tr><td><code>TECH_TO_CATEGORY</code></td><td>Now part of DB (extensible)</td><td>Links tech names to categories; new techs require a mapping entry in <code>dorks.json</code></td></tr>
-<tr><td><code>timeout</code> (SearchClient)</td><td>12.0</td><td>httpx timeout passed to <code>AsyncClient</code></td></tr>
-<tr><td><code>DB_PATH</code></td><td><code>./dorkscout.db</code></td><td>SQLite file for persistent domain and search history (auto-created and managed by <code>DiscoveryStore</code>). Now also stores <code>scheduled_jobs</code>.</td></tr>
-<tr><td><code>build_query()</code></td><td>—</td><td>Now consistently quotes the supplied <code>term</code> as a phrase for improved precision on both single-word and multi-word inputs (updated in v0.1.0 CI fixes). Advanced operators (<code>filetype:</code>, <code>intitle:</code>, <code>inurl:</code>…) inside signatures are preserved.</td></tr>
-<tr><td><code>enrich_discovery_results()</code></td><td>—</td><td>Async helper (limited to first 6 results) that calls free public APIs (Wayback Machine CDX + crt.sh). Internal semaphore and timeouts keep usage respectful. Now also applies <code>calculate_relevance_score()</code>.</td></tr>
-<tr><td><code>bulk</code> CLI</td><td>—</td><td>New subcommand options: <code>--tech</code>, <code>--category</code>, <code>--term</code> (repeatable), <code>--terms-file</code>, <code>--output</code>, <code>--limit</code>. Uses same rate limits and <code>NOISE_DOMAINS</code> as web paths. Results sorted by relevance.</td></tr>
-<tr><td><code>TECH_SIGNATURES</code></td><td>expanded in detector.py</td><td>180+ regex patterns for HTML and headers. New signatures added for WordPress, Drupal, React, Braintree, Cloudflare, PrestaShop, Laravel, Nginx, Adyen, Razorpay and 20+ more. Used by <code>detect_technologies()</code> and the browser extension.</td></tr>
-<tr><td><code>BIG_BRAND_KEYWORDS</code></td><td>set of brand names</td><td>Keywords used by <code>calculate_relevance_score()</code> (in detector.py) to downrank big brands/marketplaces and prefer smaller independent sites. Extendable in config.py.</td></tr>
-</table>
+See [CONFIG.md](CONFIG.md) for complete documentation covering all options, supported environment variables (paths, Ollama, SMTP/alert settings), how to extend `dorks.json`, and advanced code-level tweaks in `config.py`.
+
+Key highlights retained from the previous table:
+- `DORKS_JSON_PATH` / `dorks.json` for safe community extensions (deep merge + validation)
+- `SEARCH_ENGINES`, `OLLAMA_*`, `ALERT_CONFIG`, `DB_PATH`, `BIG_BRAND_KEYWORDS`
+- `TECH_SIGNATURES` (detector.py) and relevance scoring
+- `build_query()`, `enrich_discovery_results()`, and the new `bulk` CLI
 
 ## 🧩 Architecture
 
@@ -469,6 +461,7 @@ The codebase separates concerns cleanly: `dorks.py` and `config.py` manage the c
 ```text
 .
 ├── pyproject.toml                 # Metadata, dependencies, console_scripts entry 'dork-scout'
+├── CONFIG.md                      # Complete configuration reference (env vars, dorks.json, advanced options)
 ├── dorks.json                     # Optional override (merged with DEFAULT_DORK_DB)
 ├── extension/                     # Companion browser extension (Manifest V3)
 │   ├── manifest.json
@@ -522,7 +515,7 @@ The suite (`tests/test_dorks.py`, `tests/test_search.py` and `tests/test_schedul
 - [x] Add date-range and tech filters to analytics dashboard with live Chart.js updates
 - [x] Implement exponential backoff + jitter in SearchClient rate limiting
 - [x] Add comprehensive integration tests for scheduler jobs and alert payloads
-- [ ] Create CONFIG.md with all options, env vars and extension of dorks.json
+- [x] Create CONFIG.md with all options, env vars and extension of dorks.json
 - [ ] Support custom noise-domain blocklist loaded from user config file
 - [ ] Optimize DiscoveryStore queries with indexes on domain and last_seen
 - [ ] Add --verbose and --dry-run flags to CLI bulk subcommand with progress bars
